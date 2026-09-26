@@ -9,6 +9,14 @@ let lastRecordedTime = 0;
 // 20px outside an element will still count as a hit (debug), this will be personalized later
 const HITBOX_EXPANSION = 20;
 
+// Intent scoring settings
+const INTENT_DISTANCE_LIMIT = 180;
+const TRAJECTORY_WINDOW = 6;
+
+// Intent assistance settings
+const MIN_INTENT_SCORE = 0.55;
+const MIN_INTENT_MARGIN = 0.1; // avoid ambiguity between 2 close elements
+
 // Velocity calculation function
 function calculateVelocity(previous, current) {
     // Calculate distance and time diff
@@ -99,19 +107,34 @@ function findNearestElements(point, limit = 5) {
 }
 
 function findExpandedHitTarget(point) {
-    const nearest = findNearestElements(point, 1);
+    const rankedTargets = rankTargetsByIntent(point, 5);
 
-    if (nearest.length === 0) return null;
+    if (rankedTargets.length === 0) return null;
 
-    const target = nearest[0];
+    const bestTarget = rankedTargets[0];
+    const secondTarget = rankedTargets[1];
 
-    if (target.distance <= HITBOX_EXPANSION) return target;
+    // Low confidence score
+    if (bestTarget.intentScore < MIN_INTENT_SCORE) return null;
 
-    return null;
+    // Ambiguous between 2 targets
+    if (secondTarget && (bestTarget.intentScore - secondTarget.intentScore) < MIN_INTENT_MARGIN) return null;
+
+    const expansion = getExpansionByIntent(bestTarget.intentScore);
+
+    const distance = calculateDistanceToElement(point, bestTarget.element);
+
+    // Clicked within adaptive target area
+    if (distance <= expansion) {
+        return {
+            ...bestTarget,
+            expansion
+        };
+    }
 }
 
 // Determine whether the user has already clicked an element
-function getPreviousElement(element) {
+function getInteractiveAncestor(element) {
     return element.closest(
         [
             "button",
@@ -171,13 +194,33 @@ document.addEventListener("mousemove", (event) => {
     // Connect point to 5 nearest interactive elements
     const nearestElements = findNearestElements(point, 5);
 
-    // debug cursor loc
-    console.log("Cursor:", point);
+    // Rank the nearest elements by intent score
+    const intentTargets = rankTargetsByIntent(point, 5);
 
-    // debug nearby elements
-    console.log("Nearest interactive elements:", nearestElements.map(e => e.metadata));
+    updateAdaptiveHitboxes(point);
+    
+    // Debug: Console output
+    console.log(
+        "Intent ranking:",
+        intentTargets.map((target) => ({
+            target:
+                target.metadata.text ||
+                target.metadata.ariaLabel ||
+                target.metadata.tag,
 
-    console.log(point);
+            intent:
+                Math.round(target.intentScore * 100) + "%",
+
+            distance:
+                Math.round(target.distance),
+
+            direction:
+                Math.round(target.scores.direction * 100) + "%",
+
+            approach:
+                Math.round(target.scores.approach * 100) + "%"
+        }))
+    );
 });
 
 //---------------------------
@@ -191,7 +234,7 @@ document.addEventListener("click", (event) => {
     if(isSteadyUIClick) return;
     
     // If user clicks normally, don't intercept
-    const realTarget = getPreviousElement(event.target);
+    const realTarget = getInteractiveAncestor(event.target);
 
     if(realTarget) return;
 
@@ -204,7 +247,22 @@ document.addEventListener("click", (event) => {
 
     if(!expandedTarget) return;
 
-    console.log("Expanded hitbox activated: ", expandedTarget.metadata);
+    console.log("SteadyUI assistance activated: ", 
+    {
+        target:
+            expandedTarget.metadata.text ||
+            expandedTarget.metadata.ariaLabel ||
+            expandedTarget.metadata.tag,
+
+        intent: 
+            Math.round(expandedTarget.intentScore * 100) + "%",
+
+        expansion:
+            expandedTarget.expansion + "px",
+
+        distance:
+            Math.round(expandedTarget.distance) + "px"
+    });
 
     // Prevent misclick
     event.preventDefault();
@@ -229,39 +287,203 @@ true
 
 const elements = findInteractiveElements();
 
-// DEBUG: 
-// Purple - outlines interactive elements
-// Red - outlines expanded hitboxes
+// ---------------------------
+// DEBUG VISUALIZATION
+// ---------------------------
 
-function showExpandedHitboxes() {
+// Purple = actual clickable element
+// Red dashed = default 20px expanded hitbox
+
+function updateAdaptiveHitboxes(point) {
+    // Remove previous debug boxes
+    document
+        .querySelectorAll(".debug-hitbox-overlay")
+        .forEach((overlay) => overlay.remove());
+
     const elements = findInteractiveElements();
 
     elements.forEach((element) => {
-        const rect = element.getBoundingClientRect();
 
-        const overlay = document.createElement("div");
+        // Build the same target object used by intent scoring
+        const target = {
+            element: element,
+            distance: calculateDistanceToElement(point, element),
+            metadata: describeTargetElement(element)
+        };
+
+        // Calculate THIS element's current intent score
+        const scoredTarget =
+            calculateIntentScore(point, target);
+
+        // Convert intent → adaptive expansion
+        const expansion =
+            getExpansionByIntent(
+                scoredTarget.intentScore
+            );
+
+        const rect =
+            element.getBoundingClientRect();
+
+        // Purple = actual HTML element
+        element.style.outline =
+            "2px solid purple";
+
+        // Red = SteadyUI's CURRENT adaptive area
+        const overlay =
+            document.createElement("div");
 
         overlay.style.position = "fixed";
 
-        overlay.style.left = `${rect.left - HITBOX_EXPANSION}px`;
-        overlay.style.top = `${rect.top - HITBOX_EXPANSION}px`;
-        overlay.style.width = `${rect.width + HITBOX_EXPANSION * 2}px`;
-        overlay.style.height = `${rect.height + HITBOX_EXPANSION * 2}px`;
-        overlay.style.border = "1px dashed red";
-        overlay.style.pointerEvents = "none";
-        overlay.style.zIndex = "999999";
-        overlay.className = "debug-hitbox-overlay";
-        
+        overlay.style.left =
+            `${rect.left - expansion}px`;
+
+        overlay.style.top =
+            `${rect.top - expansion}px`;
+
+        overlay.style.width =
+            `${rect.width + expansion * 2}px`;
+
+        overlay.style.height =
+            `${rect.height + expansion * 2}px`;
+
+        overlay.style.border =
+            "2px dashed red";
+
+        overlay.style.pointerEvents =
+            "none";
+
+        overlay.style.zIndex =
+            "999999";
+
+        overlay.className =
+            "debug-hitbox-overlay";
+
         document.body.appendChild(overlay);
     });
 }
 
-showExpandedHitboxes();
+// -------------------------
+// Trajectory Intent Scoring
+// -------------------------
 
-elements.forEach((element) => {
-    element.style.outline = "2px solid purple";
-});
+function clamp01(value) {
+    return Math.max(0, Math.min(1, value)); // Keeps scores between 0 and 1
+}
 
-console.log(
-    `SteadyUI found ${elements.length} interactive elements`
-);
+// Get center of element to calculate direction of travel
+function getElementCenter(element) {
+    const rect = element.getBoundingClientRect();
+
+    return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+    };
+}
+
+// Compares where the mouse is moving to the element's location
+function calculateDistanceScore(point, element) {
+    const distance = calculateDistanceToElement(point, element);
+
+    return clamp01(1 - distance / INTENT_DISTANCE_LIMIT);
+}
+
+// Use cosine similarity to calculate direction score
+function calculateDirectionScore(point, element) {
+    if(movements.length < 2) return 0.5;
+
+    const startIndex = Math.max(0, movements.length - TRAJECTORY_WINDOW);
+
+    const startPoint = movements[startIndex];
+
+    // Cursor movement vector
+    const movementX = point.x - startPoint.x;
+    const movementY = point.y - startPoint.y;
+
+    // Target direction vector
+    const center = getElementCenter(element);
+    const targetX = center.x - point.x;
+    const targetY = center.y - point.y;
+
+    // Magnitudes
+    const movementMagnitude = Math.sqrt(movementX * movementX + movementY * movementY);
+    const targetMagnitude = Math.sqrt(targetX * targetX + targetY * targetY);
+
+    // Edge case: cursor movement not significant
+    if(movementMagnitude < 1) return 0.5;
+
+    // Cursor roughly at target center
+    if(targetMagnitude < 1) return 1;
+
+    const dotProduct = movementX * targetX + movementY * targetY;
+
+    const cosine = dotProduct / (movementMagnitude * targetMagnitude);
+
+    return clamp01((cosine + 1) / 2);
+}
+
+// Find out if cursor has been approaching element
+function calculateApproachScore(point, element) {
+    if (movements.length < 2) return 0.5;
+
+    const startIndex = Math.max(0, movements.length - TRAJECTORY_WINDOW);
+
+    const startPoint = movements[startIndex];
+
+    const previousDistance = calculateDistanceToElement(startPoint, element);
+    const currentDistance = calculateDistanceToElement(point, element);
+
+    // Diff: how much closer did we get
+    const diff = previousDistance - currentDistance;
+
+    return clamp01(diff / 40); // 40px diff counts as a strong approach score
+}
+
+// Take the weighted average of distance, direction, and approach scores to determine intent score
+function calculateIntentScore(point, target) {
+    const distanceScore = calculateDistanceScore(point, target.element);
+    const directionScore = calculateDirectionScore(point, target.element);
+    const approachScore = calculateApproachScore(point, target.element);
+
+    // Weighted average: 40% distance, 40% movement direction, 20% approach trend
+    const intentScore = 
+    (
+        distanceScore * 0.4 +
+        directionScore * 0.4 +
+        approachScore * 0.2
+    );
+
+    return {
+        ...target,
+        intentScore,
+        scores: {
+            distance: distanceScore,
+            direction: directionScore,
+            approach: approachScore
+        }
+    };
+}
+
+//---------------------------
+// Ranking by score
+//---------------------------
+
+function rankTargetsByIntent(point, limit = 5) {
+    const candidates = findNearestElements(point, 10);
+
+    const scored = candidates.map(target => calculateIntentScore(point, target));
+
+    scored.sort((a, b) => b.intentScore - a.intentScore);
+
+    return scored.slice(0, limit);
+}
+
+// Makes hitbox size depend on intent score.
+function getExpansionByIntent(intentScore) {
+    if (intentScore >= 0.85) return 35;
+
+    if (intentScore >= 0.7) return 25;
+
+    if (intentScore >= 0.55) return 15;
+
+    return 0;
+}
