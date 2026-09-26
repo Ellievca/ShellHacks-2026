@@ -133,6 +133,93 @@ treating the saved model as useful. Training saves a new model artifact at the
 same path, intentionally replacing the prior *model* only after a complete new
 artifact has been written; it never overwrites the raw JSONL collection files.
 
+### Current implementation test checklist
+
+After collection, run these three checks to test everything that currently has
+an end-to-end implementation.
+
+#### 1. Validate saved records and label balance
+
+From `ml/`, run:
+
+```bash
+python - <<'PY'
+from collections import Counter
+from steadyui_ml import read_records
+
+records = list(read_records("data/raw/trajectories.jsonl"))
+print("records:", len(records))
+print("sessions:", len({record.session_id for record in records}))
+print("outcomes:", dict(Counter(record.label.outcome for record in records)))
+print("all have features:", all(record.features is not None for record in records))
+PY
+```
+
+This confirms that JSONL can be read back into the schema and that every
+trajectory has calculated features. For training, the output needs at least two
+outcome labels. Normal browsing often produces only `success`; use a safe test
+page if you need controlled `miss` or `abandoned` examples.
+
+#### 2. Test offline queue and recovery
+
+1. With the companion running, note the current count:
+
+   ```bash
+   wc -l data/raw/trajectories.jsonl
+   ```
+
+2. Stop the companion in its terminal with `Ctrl+C`.
+3. On a safe browser page, complete two interactions. DevTools Console should
+   report `SteadyUI queued this capture locally.`
+4. Restart the companion with the same token.
+5. Complete one more interaction. The service worker retries the older queue
+   before sending this new record. DevTools Console reports how many queued
+   records were retried.
+6. Run `wc -l data/raw/trajectories.jsonl` again. Its count should increase by
+   at least three. If it does not, reload the unpacked extension and then
+   reload the browser page before repeating this test. Loading `dist/` requires
+   running `npm run build` again before its extension reload; loading `public/`
+   only requires the extension and page reload.
+
+#### 3. Train and test a local prediction
+
+First train the model:
+
+```bash
+python - <<'PY'
+from steadyui_ml import train_model
+
+print(train_model("data/raw/trajectories.jsonl", "models/active-model.joblib"))
+PY
+```
+
+If training reports that it needs more labels or sessions, return to collection
+and add the missing data. On success, inspect the saved model metadata:
+
+```bash
+ls -lh models/
+cat models/active-model.joblib.metadata.json
+```
+
+Test the saved model directly against the first stored trajectory:
+
+```bash
+python - <<'PY'
+from steadyui_ml import predict, read_records
+
+record = next(read_records("data/raw/trajectories.jsonl"))
+stored = record.to_dict()
+print(predict(
+    {"target": stored["target"], "samples": stored["samples"]},
+    "models/active-model.joblib",
+))
+PY
+```
+
+That final command tests feature extraction, model loading, and probability
+prediction. It does not yet cause live browser assistance: wiring extension
+interactions to `/predict` and deciding an accessibility policy are future work.
+
 ## Storage layout
 
 ```text

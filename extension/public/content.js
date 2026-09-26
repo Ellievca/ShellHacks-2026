@@ -54,7 +54,12 @@ function targetFor(element) {
 function submit(type, payload) {
   chrome.runtime.sendMessage({ type, payload }, (response) => {
     if (chrome.runtime.lastError) console.warn("SteadyUI could not reach its service worker.");
-    else if (response?.ok) console.info(`SteadyUI stored ${type} data locally.`);
+    else if (response?.ok) {
+      const retryMessage = response.result.flushed
+        ? ` and retried ${response.result.flushed} queued record(s)`
+        : "";
+      console.info(`SteadyUI stored ${type} data locally${retryMessage}.`);
+    }
     else if (!response?.ok) console.warn(response.queued ? "SteadyUI queued this capture locally." : response.error);
   });
 }
