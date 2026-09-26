@@ -1,4 +1,4 @@
-# SteadyUI ML
+************# SteadyUI ML
 
 This package owns the versioned contract between cursor collection and model training. Each line in a JSONL file is one complete `InteractionRecord`: the target shown to a person, the ordered cursor samples leading to it, its outcome label, and a reproducible set of movement features.
 
@@ -64,9 +64,11 @@ companion must be running before the browser extension can save data to `ml/`.
    wc -l data/raw/calibration.jsonl data/raw/trajectories.jsonl
    ```
 
-   The line counts increase as records are collected. If the companion is not
-   available, the extension queues up to 100 records locally; reload the
-   extension after restarting the companion to retry delivery.
+   The files are created only after the first successful delivery, so a
+   “No such file or directory” message means the browser has not successfully
+   reached the companion yet. If the companion is not available, the extension
+   queues up to 100 records locally; reload the extension after restarting the
+   companion to retry delivery.
 
 ### Train after collecting enough labelled examples
 
@@ -407,6 +409,36 @@ assistance based on a prediction yet.
 | No records appear in `data/raw/` | Test `curl http://127.0.0.1:8765/health`, reload the unpacked extension, and use a normal web page rather than `chrome://` or the Chrome Web Store. |
 | Training fails with too few labels or sessions | Collect labelled trajectories across at least two sessions and at least two outcomes. |
 | Prediction fails because no model exists | Train first; confirm `models/active-model.joblib` exists. |
+
+#### Calibration targets appeared, but no JSONL file was created
+
+The targets only prove that the content script loaded. A JSONL file appears
+only when the extension service worker receives a successful response from the
+local companion. Check these in order:
+
+1. Keep the terminal that runs `python -m steadyui_ml.server ...` open, then
+   run `curl http://127.0.0.1:8765/health`. It must return `{"status":"ok"}`.
+2. Open the extension's **Details** then **Extension options** page. Verify the
+   URL is exactly `http://127.0.0.1:8765` and that its token exactly matches
+   the token passed to `--token` when the server started.
+3. Return to the browser page and reload that page after reloading or changing
+   extension settings. Open DevTools Console. A successful click now logs
+   `SteadyUI stored calibration data locally.` A queued record logs a warning.
+4. In `chrome://extensions`, use the **service worker** link on the SteadyUI
+   card and inspect its console for request errors.
+5. To isolate the server from the extension, submit one harmless test trial
+   directly. Replace the token before running it:
+
+   ```bash
+   curl -X POST http://127.0.0.1:8765/calibration-trials \
+     -H 'Content-Type: application/json' \
+     -H 'X-SteadyUI-Token: paste-your-token-here' \
+     --data '{"trial_id":"manual-test","session_id":"manual-test","target_x":100,"target_y":100,"pointer_x":100,"pointer_y":100,"time_ms":1}'
+   ```
+
+   A `{"status":"stored",...}` response and a new
+   `data/raw/calibration.jsonl` file prove the companion is working; the
+   remaining issue is extension configuration or delivery.
 
 ### Required fields
 
