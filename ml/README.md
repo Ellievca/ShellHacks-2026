@@ -88,6 +88,51 @@ This creates `models/active-model.joblib` and its metadata file. The current
 extension collects data and the companion can serve local predictions, but it
 does not yet alter page UI automatically from model predictions.
 
+### What to do after the first collection
+
+Both JSONL files are **append-only**. Each successful calibration click adds one
+new line to `data/raw/calibration.jsonl`; each completed pointer attempt adds
+one new line to `data/raw/trajectories.jsonl`. Nothing is overwritten when you
+repeat the process. The current counts can always be checked with:
+
+```bash
+wc -l data/raw/calibration.jsonl data/raw/trajectories.jsonl
+```
+
+Five calibration trials are one complete calibration pass. Repeat calibration
+only when it is useful—for example, after changing display scaling, pointer
+hardware, browser zoom, or accessibility-device settings. Calibration is stored
+now but is not yet applied as an automatic cursor correction by the extension.
+
+Six trajectories confirm that collection works, but they are not enough for a
+meaningful outcome model. Continue using a safe test page and collect examples
+from at least three separate browser-page sessions. Reloading the page or
+opening a new tab creates a new extension session. Include multiple examples
+of at least two outcomes, usually `success` and `miss`; the training partition
+must contain both. For an early demo, aim for roughly 20–30 labelled attempts
+per outcome across those sessions. More diverse, consented examples make the
+evaluation more useful.
+
+To inspect the labels you have collected without editing the raw file:
+
+```bash
+python - <<'PY'
+from collections import Counter
+from steadyui_ml import read_records
+
+records = list(read_records("data/raw/trajectories.jsonl"))
+print("records:", len(records))
+print("sessions:", len({record.session_id for record in records}))
+print("outcomes:", dict(Counter(record.label.outcome for record in records)))
+PY
+```
+
+When that report shows at least three sessions and two outcome labels, run the
+training command above. Read the printed test accuracy and metadata before
+treating the saved model as useful. Training saves a new model artifact at the
+same path, intentionally replacing the prior *model* only after a complete new
+artifact has been written; it never overwrites the raw JSONL collection files.
+
 ## Storage layout
 
 ```text
