@@ -31,7 +31,9 @@ companion must be running before the browser extension can save data to `ml/`.
 3. In Chrome, open `chrome://extensions`, enable **Developer mode**, select
    **Load unpacked**, and choose `<repository>/extension/public`.
 4. Open the SteadyUI extension's **Details** page, choose **Extension options**,
-   and enter `http://127.0.0.1:8765` plus the generated token. Save it.
+   and enter `http://127.0.0.1:8765` plus the generated token. Save it. The
+   equals sign in `--token="..."` is safe even when a generated token starts
+   with a dash.
 
 ### Each time you collect data
 
@@ -40,7 +42,7 @@ companion must be running before the browser extension can save data to `ml/`.
    ```bash
    cd <repository>/ml
    source .venv/bin/activate
-   python -m steadyui_ml.server --token "paste-your-token-here"
+   python -m steadyui_ml.server --token="paste-your-token-here"
    ```
 
 2. In another terminal, confirm it is ready:
@@ -229,7 +231,7 @@ by the companion in `data/raw/`.
    ```bash
    cd ml
    source .venv/bin/activate
-   python -m steadyui_ml.server --token "paste-the-generated-token-here"
+   python -m steadyui_ml.server --token="paste-the-generated-token-here"
    ```
 
    It listens only on `http://127.0.0.1:8765`. Keep this terminal running while

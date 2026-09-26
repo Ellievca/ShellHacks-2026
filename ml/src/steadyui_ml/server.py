@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import secrets
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -98,13 +99,22 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self._reply(HTTPStatus.OK, response)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    # ``argparse`` treats a value beginning with ``-`` as a new option, even if
+    # it follows ``--token``. URL-safe random tokens can legitimately begin
+    # with a dash, so normalize this pair to argparse's unambiguous equals form.
+    command_line = list(sys.argv[1:] if argv is None else argv)
+    for index, argument in enumerate(command_line[:-1]):
+        if argument == "--token":
+            command_line[index : index + 2] = [f"--token={command_line[index + 1]}"]
+            break
+
     parser = argparse.ArgumentParser(description="Run the local SteadyUI companion API.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--raw-directory", type=Path, default=DEFAULT_RAW_DIRECTORY)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--token", required=True, help="Token configured in the extension options page")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(command_line)
     if not 1 <= arguments.port <= 65535:
         parser.error("port must be between 1 and 65535")
 
