@@ -10,7 +10,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .schema import CalibrationTrial, CursorSample, InteractionLabel, InteractionRecord, Target
+from .features import calculate_movement_features
+from .schema import (
+    CalibrationTrial,
+    CursorSample,
+    InteractionLabel,
+    InteractionRecord,
+    MovementFeatures,
+    Target,
+)
 from .storage import append_calibration_trial, append_record
 
 
@@ -31,6 +39,20 @@ def _sample_from_payload(value: object) -> CursorSample:
         return CursorSample.from_browser_event(dict(sample))
     except KeyError as error:
         raise ValueError(f"sample is missing {error.args[0]!r}") from error
+
+
+def features_from_payload(payload: Mapping[str, Any]) -> MovementFeatures:
+    """Validate target and browser samples, then calculate their feature vector."""
+    try:
+        target = Target.from_dict(_require_mapping(payload["target"], "target"))
+        raw_samples = payload["samples"]
+    except KeyError as error:
+        raise ValueError(f"trajectory payload is missing {error.args[0]!r}") from error
+    if isinstance(raw_samples, (str, bytes)) or not hasattr(raw_samples, "__iter__"):
+        raise ValueError("samples must be an array")
+    return calculate_movement_features(
+        tuple(_sample_from_payload(sample) for sample in raw_samples), target
+    )
 
 
 def interaction_from_payload(payload: Mapping[str, Any]) -> InteractionRecord:
