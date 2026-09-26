@@ -15,14 +15,12 @@ function calculateVelocity(previous, current) {
 
     const distance = Math.sqrt(dx * dx + dy * dy);
 
-    if (dt === 0) {
-        return 0;
-    }
+    if (dt === 0) return 0;
 
     return distance / dt;
 }
 
-// Finds all interactive elements on the page
+// Finds all visible interactive elements on the page
 function findInteractiveElements() {
     const selectors = [
         "button",
@@ -41,23 +39,34 @@ function findInteractiveElements() {
 
     return [
         ...document.querySelectorAll(selectors.join(","))
-    ];
+    ].filter((element) => {
+        const rect = element.getBoundingClientRect();
+
+        return rect.width > 0 && rect.height > 0
+    });
 }
 
-// Gets the center coordinates of an element
-function getElementCenter(element) {
+function describeTargetElement(element) {
     const rect = element.getBoundingClientRect();
 
     return {
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2
-    }
+        tag: element.tagName,
+        text: element.innerText?.trim() || "",
+        ariaLabel: element.getAttribute("aria-label"),
+        width: rect.width,
+        height: rect.height,
+    };
 }
 
-// Distance 
-function calculateDistance(pointA, pointB) {
-    const dx = pointA.x - pointB.x;
-    const dy = pointA.y - pointB.y;
+// Calculates distance from mouse to the closest element
+function calculateDistanceToElement(point, element) {
+    const rect = element.getBoundingClientRect();
+
+    const closestX = Math.max(rect.left, Math.min(point.x, rect.right));
+    const closestY = Math.max(rect.top, Math.min(point.y, rect.bottom));
+
+    const dx = point.x - closestX;
+    const dy = point.y - closestY;
 
     return Math.sqrt(dx * dx + dy * dy);
 }
@@ -67,13 +76,12 @@ function findNearestElements(point, limit = 5) {
     const elements = findInteractiveElements();
 
     const ranked = elements.map(element => {
-        const center = getElementCenter(element);
-        const distance = calculateDistance(point, center);
+        const distance = calculateDistanceToElement(point, element);
 
         return {
             element,
-            center,
-            distance
+            distance,
+            metadata: describeTargetElement(element)
         };
     });
 
@@ -101,16 +109,6 @@ document.addEventListener("mousemove", (event) => {
         time: now
     };
 
-    // Connect point to nearest interactive elements
-    const nearestElements = findNearestElements(point, 5);
-
-    console.log(
-    nearestElements.map((target) => ({
-        element: target.element.innerText || target.element.getAttribute("aria-label") || target.element.tagName,
-        distance: target.distance
-    }))
-);
-
     // Gets previous point
     const previous = movements[movements.length - 1];
 
@@ -119,12 +117,22 @@ document.addEventListener("mousemove", (event) => {
         point.velocity = calculateVelocity(previous, point);
     }
 
+    // Store current point
     movements.push(point);
 
     // Stores the most recent 100 movements
     if (movements.length > 100) {
         movements.shift();
     }
+
+    // Connect point to 5 nearest interactive elements
+    const nearestElements = findNearestElements(point, 5);
+
+    // debug cursor loc
+    console.log("Cursor:", point);
+
+    // debug nearby elements
+    console.log("Nearest interactive elements:", nearestElements.map(e => e.metadata));
 
     console.log(point);
 });
