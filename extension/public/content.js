@@ -6,6 +6,9 @@ const movements = [];
 // Tracks when last mouse movement was recorded
 let lastRecordedTime = 0;
 
+// 20px outside an element will still count as a hit (debug), this will be personalized later
+const HITBOX_EXPANSION = 20;
+
 // Velocity calculation function
 function calculateVelocity(previous, current) {
     // Calculate distance and time diff
@@ -19,6 +22,10 @@ function calculateVelocity(previous, current) {
 
     return distance / dt;
 }
+
+//-----------------------------------------
+// Interactive Element Detection + Ranking
+//-----------------------------------------
 
 // Finds all visible interactive elements on the page
 function findInteractiveElements() {
@@ -91,6 +98,42 @@ function findNearestElements(point, limit = 5) {
     return ranked.slice(0, limit);
 }
 
+function findExpandedHitTarget(point) {
+    const nearest = findNearestElements(point, 1);
+
+    if (nearest.length === 0) return null;
+
+    const target = nearest[0];
+
+    if (target.distance <= HITBOX_EXPANSION) return target;
+
+    return null;
+}
+
+// Determine whether the user has already clicked an element
+function getPreviousElement(element) {
+    return element.closest(
+        [
+            "button",
+            "a[href]",
+            "input",
+            "select",
+            "textarea",
+            "summary",
+            "[role='button']",
+            "[role='link']",
+            "[role='checkbox']",
+            "[role='radio']",
+            "[role='switch']",
+            "[role='slider']"
+        ].join(",")
+    );
+}
+
+//---------------------------
+// Mouse Movement Event Listener
+//---------------------------
+
 // Listens for mouse movements
 document.addEventListener("mousemove", (event) => {
     const now = performance.now();
@@ -137,9 +180,84 @@ document.addEventListener("mousemove", (event) => {
     console.log(point);
 });
 
+//---------------------------
+// Click Event Listener
+//---------------------------
+// Detects whether the user is actually clicking on an element or just moving the mouse over it
+let isSteadyUIClick = false;
+
+// Prevent synthetic click from getting intercepted twice
+document.addEventListener("click", (event) => {
+    if(isSteadyUIClick) return;
+    
+    // If user clicks normally, don't intercept
+    const realTarget = getPreviousElement(event.target);
+
+    if(realTarget) return;
+
+    const point = {
+        x: event.clientX,
+        y: event.clientY,
+    };
+
+    const expandedTarget = findExpandedHitTarget(point);
+
+    if(!expandedTarget) return;
+
+    console.log("Expanded hitbox activated: ", expandedTarget.metadata);
+
+    // Prevent misclick
+    event.preventDefault();
+    event.stopPropagation();
+
+    const element = expandedTarget.element;
+
+    isSteadyUIClick = true;
+    
+    // Check for special-case text fields
+    if (element.matches("input, textarea, select")) {
+        element.focus();
+    } else {
+        element.click();
+    }
+
+    isSteadyUIClick = false;
+},
+// Use the capture phase so SteadyUI examines the click before its handled by webpage
+true
+);
+
 const elements = findInteractiveElements();
 
-// debug
+// DEBUG: 
+// Purple - outlines interactive elements
+// Red - outlines expanded hitboxes
+
+function showExpandedHitboxes() {
+    const elements = findInteractiveElements();
+
+    elements.forEach((element) => {
+        const rect = element.getBoundingClientRect();
+
+        const overlay = document.createElement("div");
+
+        overlay.style.position = "fixed";
+
+        overlay.style.left = `${rect.left - HITBOX_EXPANSION}px`;
+        overlay.style.top = `${rect.top - HITBOX_EXPANSION}px`;
+        overlay.style.width = `${rect.width + HITBOX_EXPANSION * 2}px`;
+        overlay.style.height = `${rect.height + HITBOX_EXPANSION * 2}px`;
+        overlay.style.border = "1px dashed red";
+        overlay.style.pointerEvents = "none";
+        overlay.style.zIndex = "999999";
+        overlay.className = "debug-hitbox-overlay";
+        
+        document.body.appendChild(overlay);
+    });
+}
+
+showExpandedHitboxes();
+
 elements.forEach((element) => {
     element.style.outline = "2px solid purple";
 });
