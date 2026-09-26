@@ -25,7 +25,9 @@ ml/
   src/steadyui_ml/
     schema.py   # stable, serializable capture contract
     features.py # deterministic feature extraction
-    storage.py  # JSONL read/write helpers
+    ingestion.py # validates browser payloads and calculates features
+    storage.py   # append-only JSONL read/write helpers
+    datasets.py  # leakage-safe train/test preparation
 ```
 
 Use one file per collection batch, for example `data/raw/2026-09-26-session-a.jsonl`. Never store direct page text, form values, or other sensitive content in a record. `page_id` should be an application-controlled opaque or hashed identifier.
@@ -82,6 +84,40 @@ record = InteractionRecord(
 
 append_record("data/raw/collection.jsonl", record)
 ```
+
+## Collection pipeline
+
+Use the framework-neutral receive functions at the boundary of an HTTP handler,
+message consumer, or local collector. They validate the payload, calculate the
+trajectory features on receipt, and append exactly one JSONL line only after the
+record is complete.
+
+```python
+from steadyui_ml import receive_calibration_trial, receive_interaction
+
+# `trajectory_payload` uses the browser sample shape: {x, y, time, velocity}.
+record = receive_interaction(trajectory_payload, "data/raw/trajectories.jsonl")
+
+# Keep calibration measurements separate from labelled model examples.
+trial = receive_calibration_trial(
+    {
+        "trial_id": "target-1",
+        "session_id": "session-opaque-id",
+        "target_x": 400,
+        "target_y": 300,
+        "pointer_x": 403,
+        "pointer_y": 298,
+        "time_ms": 1550,
+    },
+    "data/raw/calibration.jsonl",
+)
+```
+
+The receive call is the acknowledgement boundary: return a successful response to
+the client only after it returns. Calibration and trajectory files are separate so
+calibration offsets cannot be mistaken for outcome labels. Use `read_records()`,
+`feature_rows()`, and `split_by_session()` to build model input and a deterministic
+train/test split without putting one session in both sets.
 
 ### Required fields
 

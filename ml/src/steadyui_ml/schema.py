@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from itertools import pairwise
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 SCHEMA_VERSION = "1.0"
 Outcome = Literal["success", "miss", "abandoned", "unknown"]
@@ -28,6 +28,10 @@ class BoundingBox:
     def center(self) -> tuple[float, float]:
         return (self.x + self.width / 2, self.y + self.height / 2)
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> BoundingBox:
+        return cls(**value)
+
 
 @dataclass(frozen=True)
 class Target:
@@ -40,6 +44,14 @@ class Target:
     def __post_init__(self) -> None:
         if not self.target_id:
             raise ValueError("target_id is required")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> Target:
+        return cls(
+            target_id=value["target_id"],
+            target_type=value["target_type"],
+            bounds=BoundingBox.from_dict(value["bounds"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -65,6 +77,10 @@ class CursorSample:
             velocity_px_s=event.get("velocity"),
         )
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CursorSample:
+        return cls(**value)
+
 
 @dataclass(frozen=True)
 class InteractionLabel:
@@ -83,6 +99,10 @@ class InteractionLabel:
         if self.confidence is not None and not 0 <= self.confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InteractionLabel:
+        return cls(**value)
+
 
 @dataclass(frozen=True)
 class MovementFeatures:
@@ -100,6 +120,10 @@ class MovementFeatures:
     max_acceleration_px_s2: float
     direction_changes: int
     final_target_distance_px: float
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> MovementFeatures:
+        return cls(**value)
 
 
 @dataclass(frozen=True)
@@ -132,3 +156,61 @@ class InteractionRecord:
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-ready representation with nested named fields."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InteractionRecord:
+        """Restore a record written by :meth:`to_dict` without recalculating it."""
+        features = value.get("features")
+        return cls(
+            interaction_id=value["interaction_id"],
+            session_id=value["session_id"],
+            page_id=value["page_id"],
+            target=Target.from_dict(value["target"]),
+            samples=tuple(CursorSample.from_dict(sample) for sample in value["samples"]),
+            label=InteractionLabel.from_dict(value["label"]),
+            features=MovementFeatures.from_dict(features) if features is not None else None,
+            schema_version=value.get("schema_version", SCHEMA_VERSION),
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationTrial:
+    """A target shown during pointer calibration and the reported pointer position.
+
+    A trial is intentionally separate from an interaction record: calibration measures
+    coordinate bias, while interaction records are labelled examples for outcome models.
+    Coordinates are viewport-relative CSS pixels, matching ``CursorSample``.
+    """
+
+    trial_id: str
+    session_id: str
+    target_x: float
+    target_y: float
+    pointer_x: float
+    pointer_y: float
+    time_ms: float
+    device_pixel_ratio: float = 1.0
+    schema_version: str = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.trial_id or not self.session_id:
+            raise ValueError("trial_id and session_id are required")
+        if self.device_pixel_ratio <= 0:
+            raise ValueError("device_pixel_ratio must be positive")
+
+    @property
+    def offset_x_px(self) -> float:
+        """Reported horizontal position minus the calibration target."""
+        return self.pointer_x - self.target_x
+
+    @property
+    def offset_y_px(self) -> float:
+        """Reported vertical position minus the calibration target."""
+        return self.pointer_y - self.target_y
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CalibrationTrial:
+        return cls(**value)
