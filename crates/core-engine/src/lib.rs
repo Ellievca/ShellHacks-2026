@@ -206,9 +206,6 @@ pub fn derive_calibration_profile(
     let (still_session, still_reports) = still;
     let (slow_session, slow_reports) = slow;
     let (flick_session, flick_reports) = flick;
-    if still_reports.is_empty() {
-        return Err(CalibrationError::EmptySegment("still"));
-    }
     if slow_reports.is_empty() {
         return Err(CalibrationError::EmptySegment("slow intentional movement"));
     }
@@ -227,6 +224,8 @@ pub fn derive_calibration_profile(
     {
         return Err(CalibrationError::SyntheticTremorMismatch);
     }
+    // A truly untouched mouse often emits no reports at all. That is valid
+    // evidence of zero observed still-hold noise, not a failed calibration.
     let still_noise_p95 = percentile(magnitudes(still_reports), 0.95);
     let slow_step_p25 = percentile(magnitudes(slow_reports), 0.25);
     let slow_speed_p50 = percentile(speeds(slow_reports), 0.50);
@@ -275,6 +274,172 @@ fn percentile(mut values: Vec<f32>, fraction: f32) -> f32 {
     }
     values.sort_by(f32::total_cmp);
     values[((values.len() - 1) as f32 * fraction).round() as usize]
+}
+
+/// The conservative intent classes used by the first local ML prototype.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentClass {
+    Noise,
+    SlowIntentional,
+    Flick,
+    PrecisionCorrection,
+}
+
+/// A lightweight per-class feature centroid. This is a trainable classifier
+/// baseline: inference selects the nearest normalized centroid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentClassCentroid {
+    pub class: IntentClass,
+    pub examples: usize,
+    pub centroid: Vec<f32>,
+}
+
+/// A versioned, portable per-user/per-device intent model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentModel {
+    pub schema_version: u32,
+    pub device_vendor_id: u16,
+    pub device_product_id: u16,
+    pub feature_schema: Vec<String>,
+    pub feature_mean: Vec<f32>,
+    pub feature_stddev: Vec<f32>,
+    pub classes: Vec<IntentClassCentroid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelTrainingError {
+    DeviceMismatch,
+    MissingIntentionalExamples,
+}
+
+impl fmt::Display for ModelTrainingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeviceMismatch => {
+                write!(f, "training recordings belong to different device models")
+            }
+            Self::MissingIntentionalExamples => write!(
+                f,
+                "slow and flick recordings must contain at least one movement report"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ModelTrainingError {}
+
+/// Trains a local nearest-centroid intent classifier from labeled calibration
+/// recordings. It is deliberately small and inspectable; runtime use remains
+/// opt-in until held-out-session validation is implemented.
+pub fn train_intent_model(
+    still: (&RecordingSession, &[RecordedReport]),
+    slow: (&RecordingSession, &[RecordedReport]),
+    flick: (&RecordingSession, &[RecordedReport]),
+    target: Option<(&RecordingSession, &[RecordedReport])>,
+) -> Result<IntentModel, ModelTrainingError> {
+    let same_device = |session: &RecordingSession| {
+        session.device.vendor_id == still.0.device.vendor_id
+            && session.device.product_id == still.0.device.product_id
+    };
+    if !same_device(slow.0)
+        || !same_device(flick.0)
+        || target.is_some_and(|value| !same_device(value.0))
+    {
+        return Err(ModelTrainingError::DeviceMismatch);
+    }
+    let labeled = [
+        (IntentClass::Noise, report_features(still.1)),
+        (IntentClass::SlowIntentional, report_features(slow.1)),
+        (IntentClass::Flick, report_features(flick.1)),
+        (
+            IntentClass::PrecisionCorrection,
+            target.map_or_else(Vec::new, |value| report_features(value.1)),
+        ),
+    ];
+    if labeled[1].1.is_empty() || labeled[2].1.is_empty() {
+        return Err(ModelTrainingError::MissingIntentionalExamples);
+    }
+    let mut all = Vec::new();
+    for (_, rows) in &labeled {
+        all.extend(rows.iter().copied());
+    }
+    let dimensions = 3;
+    let mean = (0..dimensions)
+        .map(|index| all.iter().map(|row| row[index]).sum::<f32>() / all.len() as f32)
+        .collect::<Vec<_>>();
+    let stddev = (0..dimensions)
+        .map(|index| {
+            let variance = all
+                .iter()
+                .map(|row| (row[index] - mean[index]).powi(2))
+                .sum::<f32>()
+                / all.len() as f32;
+            variance.sqrt().max(0.0001)
+        })
+        .collect::<Vec<_>>();
+    let classes = labeled
+        .into_iter()
+        .map(|(class, rows)| {
+            // An empty still stage is valid: it contributes one zero-motion noise example.
+            let rows = if rows.is_empty() && class == IntentClass::Noise {
+                vec![[0.0; 3]]
+            } else {
+                rows
+            };
+            let centroid = (0..dimensions)
+                .map(|index| {
+                    rows.iter()
+                        .map(|row| (row[index] - mean[index]) / stddev[index])
+                        .sum::<f32>()
+                        / rows.len() as f32
+                })
+                .collect();
+            IntentClassCentroid {
+                class,
+                examples: rows.len(),
+                centroid,
+            }
+        })
+        .filter(|centroid| centroid.examples > 0)
+        .collect();
+    Ok(IntentModel {
+        schema_version: 1,
+        device_vendor_id: still.0.device.vendor_id,
+        device_product_id: still.0.device.product_id,
+        feature_schema: vec![
+            "magnitude".into(),
+            "log_speed".into(),
+            "direction_reversal".into(),
+        ],
+        feature_mean: mean,
+        feature_stddev: stddev,
+        classes,
+    })
+}
+
+fn report_features(reports: &[RecordedReport]) -> Vec<[f32; 3]> {
+    reports
+        .iter()
+        .enumerate()
+        .map(|(index, report)| {
+            let magnitude = ((report.dx as f32).powi(2) + (report.dy as f32).powi(2)).sqrt();
+            let dt = index
+                .checked_sub(1)
+                .map(|previous| report.t_us.saturating_sub(reports[previous].t_us).max(1))
+                .unwrap_or(1_000) as f32
+                / 1_000_000.0;
+            let reversal = index
+                .checked_sub(1)
+                .map(|previous| {
+                    (report.dx as i16 * reports[previous].dx as i16
+                        + report.dy as i16 * reports[previous].dy as i16)
+                        < 0
+                })
+                .unwrap_or(false) as u8 as f32;
+            [magnitude, (magnitude / dt).ln_1p(), reversal]
+        })
+        .collect()
 }
 
 #[cfg(test)]

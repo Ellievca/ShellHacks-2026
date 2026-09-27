@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "device_vendor_id": 7247,
+  "device_product_id": 72,
+  "feature_schema": [
+    "magnitude",
+    "log_speed",
+    "direction_reversal"
+  ],
+  "feature_mean": [
+    5.592518,
+    5.4142804,
+    0.16934144
+  ],
+  "feature_stddev": [
+    9.436867,
+    1.582458,
+    0.37504706
+  ],
+  "classes": [
+    {
+      "class": "noise",
+      "examples": 263,
+      "centroid": [
+        -0.44968414,
+        -0.7193065,
+        1.8903922
+      ]
+    },
+    {
+      "class": "slow_intentional",
+      "examples": 639,
+      "centroid": [
+        -0.39927065,
+        -0.32079375,
+        -0.37224123
+      ]
+    },
+    {
+      "class": "flick",
+      "examples": 346,
+      "centroid": [
+        1.2308547,
+        0.9023062,
+        -0.3282227
+      ]
+    },
+    {
+      "class": "precision_correction",
+      "examples": 559,
+      "centroid": [
+        -0.09387097,
+        0.14663231,
+        -0.2607283
+      ]
+    }
+  ]
+}
