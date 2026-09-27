@@ -202,6 +202,9 @@ impl MacOsPointerSink {
                 (mapping.dragged, mapping.button)
             });
 
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| MacOsSinkError::new("Failed to create CoreGraphics event source"))?;
+
         let event = CGEvent::new_mouse_event(
             source,
             CGEventType::MouseMoved,

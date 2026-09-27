@@ -54,7 +54,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "train" => train_model(parse_train_request(rest)?),
         "filter" => filter_live(parse_filter_request(rest)?),
         "replay-filter" => replay_filtered(parse_replay_request(rest)?),
+        #[cfg(target_os = "linux")]
         "run-linux" => run_linux(parse_linux_live_request(rest)?),
+
+        #[cfg(not(target_os = "linux"))]
+        "run-linux" => Err("run-linux is only available on Linux".into()),
         "bridge" => {
             let request = parse_bridge_request(rest)?;
             bridge::serve(
