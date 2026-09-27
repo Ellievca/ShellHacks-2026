@@ -1,38 +1,47 @@
 ## About
-zeroTremor is an accessibility engine that learns how you physically interact with a computer, then modifies interfaces around your motor abilities in real time.
 
-Imagine trying to click a tiny button when your hand physically won’t stay still.
+**zeroTremor** is an adaptive accessibility project designed to make computer interaction easier for people with hand tremor and other motor impairments.
 
-For people with essential tremor, Parkinson’s, or other motor impairments, using a computer can turn simple actions—clicking a link, filling out a form, or selecting a menu—into frustrating precision tasks.
+Imagine knowing exactly which button you want to click — but your hand physically won't stay still long enough to land on it.
 
-That’s why we built **zeroTremor**, an adaptive accessibility system that works at both the operating-system and browser level.
+For people with essential tremor, Parkinson's disease, and other conditions affecting motor control, everyday web interactions such as clicking links, filling out forms, and navigating menus can become frustrating precision tasks.
 
-At the OS level, zeroTremor reads a user’s physical mouse input, suppresses the shaky raw movement, filters out tremor-like motion, and replaces it with a smoother synthetic cursor—all while preserving intentional movements like fast flicks.
+### SteadyUI
 
-But smoothing the cursor only solves half the problem. Our Chrome extension understands what’s actually on the webpage. It detects interactive elements like buttons, links, and inputs, and dynamically expands their effective hitboxes based on the user’s individual tremor profile.
+Our working prototype, **SteadyUI**, is a standalone Chrome extension that adapts webpage interactions to the way an individual user moves.
 
-The two layers communicate through a native bridge, so one calibration can personalize both the cursor stabilization and the browser interface.
+SteadyUI begins with a short calibration exercise. As the user moves between targets, it measures pointer-path efficiency, missed clicks, and target-acquisition time to generate a personalized assistance profile.
 
-Instead of asking someone with a motor disability to adapt to their computer, **zeroTremor makes the computer adapt to them.**
+On any webpage, SteadyUI then:
+
+- Detects interactive elements such as buttons, links, inputs, and controls.
+- Analyzes pointer trajectory, distance, direction, and approach behavior to estimate the user's intended target.
+- Dynamically expands the effective hit area of likely targets based on the user's calibrated assistance profile.
+- Rescues near-miss clicks when the user's intent is sufficiently clear.
+
+The webpage itself does not need to be modified.
+
+### Synthetic Tremor Testing
+
+To test SteadyUI under repeatable motor-control difficulty, we also built a configurable tremor simulator in Rust.
+
+The simulator produces synthetic tremor-like pointer movement that lets us compare interaction performance under controlled conditions without representing the data as real patient or clinical data.
 
 ### Synthetic Tremor Test Results
 
-#### WITHOUT zeroTremor
-10 misses
+| | Without SteadyUI | With SteadyUI |
+|---|---:|---:|
+| Missed targets | 10 | **1** |
+| Average target time | 1.64 s | **1.13 s** |
+| Path efficiency ratio | 2.25× | **1.83×** |
+| Adaptive assistance profile | 36 px | 28 px |
 
-1.64 s average target time
+**90% fewer missed targets**
 
-2.25× path efficiency
+**31% faster target acquisition**
 
-#### WITH zeroTremor
-1 miss
+**18% reduction in path-efficiency ratio**
 
-1.13 s average target time
+These results come from our synthetic tremor test environment and are intended as prototype validation, not clinical evidence.
 
-1.83× path efficiency
-
-90% fewer misses
-
-31% faster target acquisition
-
-18% more efficient cursor paths
+Instead of asking someone with a motor disability to become more precise, **zeroTremor makes the interface more forgiving.**
