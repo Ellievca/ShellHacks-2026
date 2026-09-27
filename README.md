@@ -97,10 +97,13 @@ cargo run -p daemon -- calibrate \
   --profile profiles/demo-user.json
 ```
 
-The generated profile stores the device model, still-hold noise percentile,
-slow-motion and flick speeds, a smoothing strength, and a flick-bypass
-threshold. It is an explainable baseline for personalization; future filtering
-uses these values rather than assuming every user has the same tremor pattern.
+The generated profile stores the device model, still-hold noise percentile, a
+safe deadband cap, slow-motion and flick speeds, a smoothing strength, and a
+flick-bypass threshold. The deadband cap is bounded by the lower end of the
+slow-intentional recording, so an unusually noisy still hold cannot erase each
+small deliberate report. It is an explainable baseline for personalization;
+future filtering uses these values rather than assuming every user has the
+same tremor pattern.
 
 ### Inspect live personalized correction
 
@@ -120,6 +123,59 @@ will later feed the native Linux/macOS pointer sink after the correction is
 validated. Flick bypass requires both a high measured speed and a meaningful
 single-report displacement, so a tiny movement in a very short report interval
 is not accidentally treated as a fast flick.
+
+### Validate corrected replay safely
+
+`replay-filter` is the next integration step. It reads a saved portable
+recording, applies `PersonalizedTremorFilter`, and sends **only the corrected
+`dx`/`dy` values** to the native virtual pointer sink. It never opens the
+physical mouse, so it cannot create duplicate physical-plus-virtual input.
+
+First inspect the comparison without creating a virtual pointer:
+
+```bash
+cargo run -p daemon -- replay-filter \
+  --record recordings/slow.jsonl \
+  --profile profiles/demo-user.json \
+  --dry-run
+```
+
+Then replay the same corrected output through the virtual mouse. Keep your
+hand off the physical mouse while it runs:
+
+```bash
+cargo run -p daemon -- replay-filter \
+  --record recordings/slow.jsonl \
+  --profile profiles/demo-user.json
+```
+
+The command prints a per-report raw-versus-corrected table and a summary of
+raw/corrected travel distance, net displacement, emitted reports, and how
+often each filter mode was selected. Linux uses `zeroTremor Virtual Mouse`
+via `/dev/uinput`; macOS uses the CoreGraphics sink. On Linux complete the
+one-time `uinput` setup above first; macOS may request Accessibility access.
+
+Use a separate `general` recording for a realistic check of normal work:
+
+```bash
+cargo run -p daemon -- capture --vid 1c4f --pid 0048 \
+  --record recordings/validation.jsonl --segment general
+
+cargo run -p daemon -- replay-filter \
+  --record recordings/validation.jsonl \
+  --profile profiles/demo-user.json --dry-run
+```
+
+Tune by recapturing—not hand-editing—the three calibration sessions, then
+compare the validation summary again. If intentional slow movement is often
+deadbanded, redo the **still** hold with the mouse truly untouched and
+recalibrate. If tremor-like reversals never show `Smooth`, capture slower,
+smaller deliberate movement and re-run calibration. If normal flicks are
+reduced, recapture representative flicks. A useful profile suppresses
+low-amplitude noise while preserving most validation-recording travel and
+fast flicks. Re-run `calibrate` after updating zeroTremor: existing profiles
+remain readable, but a new profile includes the current deadband cap and
+integer-delta smoothing tuning.
 
 ### Replay a recording
 
@@ -189,6 +245,10 @@ physical mouse → HID report → decoder → PointerSample (dx/dy) → filter �
 - **Replay:** reading a saved capture log and feeding its samples back through
   the pipeline, using the original timing between reports. It makes filter and
   output work reproducible without touching the physical mouse.
+- **Corrected replay:** a safe validation mode that applies the saved profile
+  to a recording before it reaches the pointer sink. Its comparison summary
+  quantifies how much movement was removed before any live correction is
+  attempted.
 - **Pointer sink:** the final platform-specific component that receives a
   relative movement and asks the OS to move a cursor. A `NoopSink` accepts
   samples but intentionally does nothing, which is useful for safe testing.

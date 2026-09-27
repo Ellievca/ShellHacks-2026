@@ -125,11 +125,20 @@ pub struct CalibrationProfile {
     pub device_vendor_id: u16,
     pub device_product_id: u16,
     pub still_noise_p95: f32,
+    /// Operational deadband, capped so it cannot erase the user's typical
+    /// smallest deliberate slow-movement step. Older profiles use 0.75,
+    /// which preserves one-unit mouse reports while still suppressing zeros.
+    #[serde(default = "default_deadband_threshold")]
+    pub deadband_threshold: f32,
     pub slow_speed_p50: f32,
     pub flick_speed_p10: f32,
     pub reversal_window_ms: u32,
     pub smoothing_strength: f32,
     pub flick_speed_threshold: f32,
+}
+
+fn default_deadband_threshold() -> f32 {
+    0.75
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +187,7 @@ pub fn derive_calibration_profile(
         return Err(CalibrationError::DeviceMismatch);
     }
     let still_noise_p95 = percentile(magnitudes(still_reports), 0.95);
+    let slow_step_p25 = percentile(magnitudes(slow_reports), 0.25);
     let slow_speed_p50 = percentile(speeds(slow_reports), 0.50);
     let flick_speed_p10 = percentile(speeds(flick_reports), 0.10);
     Ok(CalibrationProfile {
@@ -185,10 +195,18 @@ pub fn derive_calibration_profile(
         device_vendor_id: still_session.device.vendor_id,
         device_product_id: still_session.device.product_id,
         still_noise_p95,
+        // HID reports are integer deltas. A still capture can contain a few
+        // large bumps, but its p95 must never cause ordinary one-unit slow
+        // motion to disappear report-by-report.
+        deadband_threshold: still_noise_p95.min((slow_step_p25 * 0.75).max(0.5)),
         slow_speed_p50,
         flick_speed_p10,
         reversal_window_ms: 45,
-        smoothing_strength: (still_noise_p95 / (slow_speed_p50 + 1.0)).clamp(0.15, 0.85),
+        // At least 35% history is needed for a one-unit reversal to be
+        // observably reduced after integer mouse-delta rounding. The ratio
+        // still raises smoothing for users whose measured still noise is high
+        // relative to their deliberate speed.
+        smoothing_strength: (still_noise_p95 / (slow_speed_p50 + 1.0)).clamp(0.35, 0.85),
         flick_speed_threshold: (flick_speed_p10 * 0.75).max(slow_speed_p50 * 1.5),
     })
 }
@@ -279,6 +297,8 @@ mod tests {
         )
         .unwrap();
         assert!(profile.flick_speed_threshold > profile.slow_speed_p50);
+        assert!(profile.deadband_threshold <= profile.still_noise_p95);
+        assert!(profile.smoothing_strength >= 0.35);
     }
 }
 
@@ -364,7 +384,7 @@ impl PersonalizedTremorFilter {
         let flick_min_step = (self.profile.still_noise_p95 * 3.0).max(4.0);
         let mode = if speed >= self.profile.flick_speed_threshold && magnitude >= flick_min_step {
             FilterMode::FlickBypass
-        } else if magnitude <= self.profile.still_noise_p95 {
+        } else if magnitude <= self.profile.deadband_threshold {
             FilterMode::Deadband
         } else if self.has_small_reversal(sample) {
             FilterMode::Smooth
@@ -465,6 +485,7 @@ mod filter_tests {
             device_vendor_id: 0x1c4f,
             device_product_id: 0x0048,
             still_noise_p95: 0.5,
+            deadband_threshold: 0.5,
             slow_speed_p50: 10.0,
             flick_speed_p10: 100.0,
             reversal_window_ms: 45,
@@ -499,6 +520,7 @@ mod filter_tests {
             device_vendor_id: 0x1c4f,
             device_product_id: 0x0048,
             still_noise_p95: 0.5,
+            deadband_threshold: 0.5,
             slow_speed_p50: 1.0,
             flick_speed_p10: 10.0,
             reversal_window_ms: 45,

@@ -2,7 +2,7 @@
 
 use core_engine::{
     derive_calibration_profile, read_jsonl_reports, CalibrationProfile, CalibrationSegment,
-    PersonalizedTremorFilter, PointerFilter,
+    FilterMode, PersonalizedTremorFilter, PointerFilter, PointerSample, PointerSink,
 };
 use hid_capture::{
     list_devices, open_device, DemoMouseDecoder, DeviceSelection, DeviceSelector,
@@ -13,6 +13,14 @@ use std::fs::File;
 use std::io::BufReader;
 use std::io::Write;
 use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+use os_virtual_input::LinuxUinputPointerSink;
+#[cfg(target_os = "macos")]
+use os_virtual_input::MacOsPointerSink;
+use os_virtual_input::NoopSink;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -33,12 +41,201 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "capture" | "inspect-device" => capture(parse_capture_request(rest)?),
         "calibrate" => calibrate(rest),
         "filter" => filter_live(parse_filter_request(rest)?),
+        "replay-filter" => replay_filtered(parse_replay_request(rest)?),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
         }
         _ => Err(usage()),
     }
+}
+
+struct ReplayRequest {
+    record_path: String,
+    profile_path: String,
+    dry_run: bool,
+}
+
+/// Replays only the filter output from a saved recording. This deliberately
+/// has no physical-HID input path: it is the safe integration test before
+/// live cursor correction is attempted.
+fn replay_filtered(request: ReplayRequest) -> Result<(), String> {
+    let recording_file = File::open(&request.record_path).map_err(|error| {
+        format!(
+            "could not open recording {:?}: {error}",
+            request.record_path
+        )
+    })?;
+    let (session, reports) =
+        read_jsonl_reports(BufReader::new(recording_file)).map_err(|error| {
+            format!(
+                "could not read recording {:?}: {error}",
+                request.record_path
+            )
+        })?;
+    if reports.is_empty() {
+        return Err(format!(
+            "recording {:?} contains no reports",
+            request.record_path
+        ));
+    }
+    let profile_file = File::open(&request.profile_path)
+        .map_err(|error| format!("could not open profile {:?}: {error}", request.profile_path))?;
+    let profile: CalibrationProfile = serde_json::from_reader(profile_file).map_err(|error| {
+        format!(
+            "invalid calibration profile {:?}: {error}",
+            request.profile_path
+        )
+    })?;
+    if profile.device_vendor_id != session.device.vendor_id
+        || profile.device_product_id != session.device.product_id
+    {
+        return Err(format!(
+            "profile is for {:04X}:{:04X}, but recording is from {:04X}:{:04X}",
+            profile.device_vendor_id,
+            profile.device_product_id,
+            session.device.vendor_id,
+            session.device.product_id
+        ));
+    }
+
+    println!(
+        "Validating {} reports from {:?} with {:?}",
+        reports.len(),
+        request.record_path,
+        request.profile_path
+    );
+    println!(
+        "profile: noise_p95={:.2} deadband={:.2} smoothing={:.2} flick_speed_threshold={:.2}",
+        profile.still_noise_p95,
+        profile.deadband_threshold,
+        profile.smoothing_strength,
+        profile.flick_speed_threshold
+    );
+    println!("t_us       raw(dx,dy)  corrected(dx,dy)  mode");
+
+    if request.dry_run {
+        println!("Dry run: no virtual mouse will be created.");
+        let mut sink = NoopSink;
+        let summary = replay_reports(&reports, profile, &mut sink, false)?;
+        print_replay_summary(summary);
+        return Ok(());
+    }
+
+    println!("Starting corrected virtual-pointer replay in 2 seconds. Keep your hand off the physical mouse.");
+    thread::sleep(Duration::from_secs(2));
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut sink = LinuxUinputPointerSink::new().map_err(|error| error.to_string())?;
+        let summary = replay_reports(&reports, profile, &mut sink, true)?;
+        print_replay_summary(summary);
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut sink = MacOsPointerSink::new().map_err(|error| error.to_string())?;
+        let summary = replay_reports(&reports, profile, &mut sink, true)?;
+        print_replay_summary(summary);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err("replay-filter currently supports Linux and macOS only; use --dry-run to inspect this recording here".into())
+    }
+}
+
+#[derive(Default)]
+struct ReplaySummary {
+    reports: usize,
+    emitted_reports: usize,
+    raw_distance: f32,
+    corrected_distance: f32,
+    raw_dx: f32,
+    raw_dy: f32,
+    corrected_dx: f32,
+    corrected_dy: f32,
+    deadband: usize,
+    smooth: usize,
+    flick_bypass: usize,
+    pass_through: usize,
+}
+
+fn replay_reports<S: PointerSink>(
+    reports: &[core_engine::RecordedReport],
+    profile: CalibrationProfile,
+    sink: &mut S,
+    preserve_timing: bool,
+) -> Result<ReplaySummary, String>
+where
+    S::Error: std::fmt::Display,
+{
+    let mut filter = PersonalizedTremorFilter::new(profile);
+    let mut previous_timestamp = None;
+    let mut summary = ReplaySummary::default();
+    for report in reports {
+        if preserve_timing {
+            if let Some(previous) = previous_timestamp {
+                // Long idle gaps are irrelevant to filter validation and make
+                // an accidental stale recording unpleasant to replay.
+                let delay_us = report.t_us.saturating_sub(previous).min(1_000_000);
+                thread::sleep(Duration::from_micros(delay_us));
+            }
+        }
+        let raw = PointerSample {
+            dx: f32::from(report.dx),
+            dy: f32::from(report.dy),
+            timestamp_us: report.t_us,
+        };
+        let (corrected, mode) = filter.filter_with_mode(raw);
+        println!(
+            "{:<10} ({:>4.0},{:>4.0}) ({:>4.0},{:>4.0})  {:?}",
+            raw.timestamp_us, raw.dx, raw.dy, corrected.dx, corrected.dy, mode
+        );
+        if corrected.dx != 0.0 || corrected.dy != 0.0 {
+            sink.emit_relative(corrected.dx, corrected.dy)
+                .map_err(|error| {
+                    format!("could not emit corrected virtual-pointer movement: {error}")
+                })?;
+            summary.emitted_reports += 1;
+        }
+        summary.reports += 1;
+        summary.raw_distance += raw.dx.hypot(raw.dy);
+        summary.corrected_distance += corrected.dx.hypot(corrected.dy);
+        summary.raw_dx += raw.dx;
+        summary.raw_dy += raw.dy;
+        summary.corrected_dx += corrected.dx;
+        summary.corrected_dy += corrected.dy;
+        match mode {
+            FilterMode::Deadband => summary.deadband += 1,
+            FilterMode::Smooth => summary.smooth += 1,
+            FilterMode::FlickBypass => summary.flick_bypass += 1,
+            FilterMode::PassThrough => summary.pass_through += 1,
+        }
+        previous_timestamp = Some(raw.timestamp_us);
+    }
+    Ok(summary)
+}
+
+fn print_replay_summary(summary: ReplaySummary) {
+    let reduction = if summary.raw_distance == 0.0 {
+        0.0
+    } else {
+        (1.0 - summary.corrected_distance / summary.raw_distance) * 100.0
+    };
+    println!("\nComparison summary:");
+    println!(
+        "reports={} emitted_corrected={} raw_distance={:.1} corrected_distance={:.1} reduction={reduction:.1}%",
+        summary.reports, summary.emitted_reports, summary.raw_distance, summary.corrected_distance
+    );
+    println!(
+        "net raw=({:.0},{:.0}) corrected=({:.0},{:.0})",
+        summary.raw_dx, summary.raw_dy, summary.corrected_dx, summary.corrected_dy
+    );
+    println!(
+        "modes: deadband={} smooth={} pass_through={} flick_bypass={}",
+        summary.deadband, summary.smooth, summary.pass_through, summary.flick_bypass
+    );
 }
 
 struct FilterRequest {
@@ -73,8 +270,11 @@ fn filter_live(request: FilterRequest) -> Result<(), String> {
         opened.info.vendor_id, opened.info.product_id, request.profile_path
     );
     println!(
-        "profile: noise_p95={:.2} smoothing={:.2} flick_speed_threshold={:.2}",
-        profile.still_noise_p95, profile.smoothing_strength, profile.flick_speed_threshold
+        "profile: noise_p95={:.2} deadband={:.2} smoothing={:.2} flick_speed_threshold={:.2}",
+        profile.still_noise_p95,
+        profile.deadband_threshold,
+        profile.smoothing_strength,
+        profile.flick_speed_threshold
     );
     let mut filter = PersonalizedTremorFilter::new(profile);
     loop {
@@ -205,8 +405,11 @@ fn calibrate(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("could not write profile {output:?}: {error}"))?;
     println!("Saved personalized calibration profile to {output}");
     println!(
-        "noise_p95={:.2} smoothing={:.2} flick_threshold={:.2}",
-        profile.still_noise_p95, profile.smoothing_strength, profile.flick_speed_threshold
+        "noise_p95={:.2} deadband={:.2} smoothing={:.2} flick_threshold={:.2}",
+        profile.still_noise_p95,
+        profile.deadband_threshold,
+        profile.smoothing_strength,
+        profile.flick_speed_threshold
     );
     Ok(())
 }
@@ -276,6 +479,40 @@ fn parse_filter_request(args: &[String]) -> Result<FilterRequest, String> {
     })
 }
 
+fn parse_replay_request(args: &[String]) -> Result<ReplayRequest, String> {
+    let mut record_path = None;
+    let mut profile_path = None;
+    let mut dry_run = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--record" | "--profile" => {
+                let flag = &args[index];
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| format!("{flag} requires a path"))?
+                    .clone();
+                if flag == "--record" {
+                    record_path = Some(value);
+                } else {
+                    profile_path = Some(value);
+                }
+                index += 2;
+            }
+            flag => return Err(format!("unknown replay-filter option {flag:?}")),
+        }
+    }
+    Ok(ReplayRequest {
+        record_path: record_path.ok_or("replay-filter requires --record <file.jsonl>")?,
+        profile_path: profile_path.ok_or("replay-filter requires --profile <profile.json>")?,
+        dry_run,
+    })
+}
+
 fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     match value {
         "still" => Ok(CalibrationSegment::Still),
@@ -296,7 +533,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]
@@ -331,5 +568,19 @@ mod tests {
             "1c4f".into()
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parses_filtered_replay_with_optional_dry_run() {
+        let request = parse_replay_request(&[
+            "--dry-run".into(),
+            "--record".into(),
+            "recordings/slow.jsonl".into(),
+            "--profile".into(),
+            "profiles/demo.json".into(),
+        ])
+        .unwrap();
+        assert!(request.dry_run);
+        assert_eq!(request.record_path, "recordings/slow.jsonl");
     }
 }
