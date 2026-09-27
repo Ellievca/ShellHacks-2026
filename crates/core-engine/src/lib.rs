@@ -1,6 +1,7 @@
 //! Platform-neutral pointer processing primitives for zeroTremor.
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{BufRead, Write};
 
@@ -308,5 +309,186 @@ pub struct PassthroughFilter;
 impl PointerFilter for PassthroughFilter {
     fn filter(&mut self, sample: PointerSample) -> PointerSample {
         sample
+    }
+}
+
+/// The decision made for one sample by [`PersonalizedTremorFilter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterMode {
+    PassThrough,
+    Deadband,
+    Smooth,
+    FlickBypass,
+}
+
+/// A causal, profile-driven filter for reducing low-amplitude reversals.
+///
+/// It intentionally uses only the past `reversal_window_ms` of movement so it
+/// can run live without waiting for future reports.
+pub struct PersonalizedTremorFilter {
+    profile: CalibrationProfile,
+    history: VecDeque<PointerSample>,
+    previous_output: PointerSample,
+    residual_dx: f32,
+    residual_dy: f32,
+    mode: FilterMode,
+}
+
+impl PersonalizedTremorFilter {
+    pub fn new(profile: CalibrationProfile) -> Self {
+        Self {
+            profile,
+            history: VecDeque::new(),
+            previous_output: PointerSample {
+                dx: 0.0,
+                dy: 0.0,
+                timestamp_us: 0,
+            },
+            residual_dx: 0.0,
+            residual_dy: 0.0,
+            mode: FilterMode::PassThrough,
+        }
+    }
+
+    pub fn last_mode(&self) -> FilterMode {
+        self.mode
+    }
+
+    pub fn filter_with_mode(&mut self, sample: PointerSample) -> (PointerSample, FilterMode) {
+        self.trim_history(sample.timestamp_us);
+        let speed = self.speed(sample);
+        let magnitude = magnitude(sample.dx, sample.dy);
+        // A short report interval can make a one- or two-unit tremor step
+        // appear fast. Require both speed and a meaningful single-report
+        // displacement before treating it as an intentional flick.
+        let flick_min_step = (self.profile.still_noise_p95 * 3.0).max(4.0);
+        let mode = if speed >= self.profile.flick_speed_threshold && magnitude >= flick_min_step {
+            FilterMode::FlickBypass
+        } else if magnitude <= self.profile.still_noise_p95 {
+            FilterMode::Deadband
+        } else if self.has_small_reversal(sample) {
+            FilterMode::Smooth
+        } else {
+            FilterMode::PassThrough
+        };
+        self.history.push_back(sample);
+        let output = match mode {
+            FilterMode::PassThrough | FilterMode::FlickBypass => {
+                self.residual_dx = 0.0;
+                self.residual_dy = 0.0;
+                sample
+            }
+            FilterMode::Deadband => PointerSample {
+                dx: 0.0,
+                dy: 0.0,
+                ..sample
+            },
+            FilterMode::Smooth => {
+                let strength = self.profile.smoothing_strength;
+                let dx = sample.dx * (1.0 - strength) + self.previous_output.dx * strength;
+                let dy = sample.dy * (1.0 - strength) + self.previous_output.dy * strength;
+                self.emit_with_residual(sample.timestamp_us, dx, dy)
+            }
+        };
+        self.previous_output = output;
+        self.mode = mode;
+        (output, mode)
+    }
+
+    fn speed(&self, sample: PointerSample) -> f32 {
+        let Some(previous) = self.history.back() else {
+            return 0.0;
+        };
+        let elapsed_s = sample
+            .timestamp_us
+            .saturating_sub(previous.timestamp_us)
+            .max(1) as f32
+            / 1_000_000.0;
+        magnitude(sample.dx, sample.dy) / elapsed_s
+    }
+
+    fn has_small_reversal(&self, sample: PointerSample) -> bool {
+        let Some(previous) = self.history.back() else {
+            return false;
+        };
+        let max_tremor_step = self.profile.still_noise_p95 * 2.5 + 1.0;
+        let dot = sample.dx * previous.dx + sample.dy * previous.dy;
+        dot < 0.0
+            && magnitude(sample.dx, sample.dy) <= max_tremor_step
+            && magnitude(previous.dx, previous.dy) <= max_tremor_step
+    }
+
+    fn trim_history(&mut self, now_us: u64) {
+        let window_us = u64::from(self.profile.reversal_window_ms) * 1_000;
+        while self
+            .history
+            .front()
+            .is_some_and(|sample| now_us.saturating_sub(sample.timestamp_us) > window_us)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    fn emit_with_residual(&mut self, timestamp_us: u64, dx: f32, dy: f32) -> PointerSample {
+        let total_dx = dx + self.residual_dx;
+        let total_dy = dy + self.residual_dy;
+        let emitted_dx = total_dx.round();
+        let emitted_dy = total_dy.round();
+        self.residual_dx = total_dx - emitted_dx;
+        self.residual_dy = total_dy - emitted_dy;
+        PointerSample {
+            dx: emitted_dx,
+            dy: emitted_dy,
+            timestamp_us,
+        }
+    }
+}
+
+impl PointerFilter for PersonalizedTremorFilter {
+    fn filter(&mut self, sample: PointerSample) -> PointerSample {
+        self.filter_with_mode(sample).0
+    }
+}
+
+fn magnitude(dx: f32, dy: f32) -> f32 {
+    (dx.powi(2) + dy.powi(2)).sqrt()
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn personalized_filter_deadbands_and_smooths_small_reversals() {
+        let profile = CalibrationProfile {
+            schema_version: 1,
+            device_vendor_id: 0x1c4f,
+            device_product_id: 0x0048,
+            still_noise_p95: 0.5,
+            slow_speed_p50: 10.0,
+            flick_speed_p10: 100.0,
+            reversal_window_ms: 45,
+            smoothing_strength: 0.5,
+            flick_speed_threshold: 10_000.0,
+        };
+        let mut filter = PersonalizedTremorFilter::new(profile);
+        let (still, mode) = filter.filter_with_mode(PointerSample {
+            dx: 0.2,
+            dy: 0.0,
+            timestamp_us: 0,
+        });
+        assert_eq!(mode, FilterMode::Deadband);
+        assert_eq!(still.dx, 0.0);
+        filter.filter_with_mode(PointerSample {
+            dx: 1.0,
+            dy: 0.0,
+            timestamp_us: 10_000,
+        });
+        let (_, mode) = filter.filter_with_mode(PointerSample {
+            dx: -1.0,
+            dy: 0.0,
+            timestamp_us: 20_000,
+        });
+        assert_eq!(mode, FilterMode::Smooth);
     }
 }

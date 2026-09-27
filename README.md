@@ -102,6 +102,23 @@ slow-motion and flick speeds, a smoothing strength, and a flick-bypass
 threshold. It is an explainable baseline for personalization; future filtering
 uses these values rather than assuming every user has the same tremor pattern.
 
+### Inspect live personalized correction
+
+Load the saved profile and run the causal personalized filter against the same
+physical mouse:
+
+```bash
+cargo run -p daemon -- filter --vid 1c4f --pid 0048 --profile profiles/demo-user.json
+```
+
+This is intentionally diagnostic-only: it prints each decoded report beside
+the corrected motion and mode, but does not move the cursor yet. `Deadband`
+suppresses movement below the measured still-hold noise; `Smooth` reduces
+small rapid reversals; `FlickBypass` preserves a fast intentional flick; and
+`PassThrough` leaves likely intentional movement unchanged. The same profile
+will later feed the native Linux/macOS pointer sink after the correction is
+validated.
+
 ### Replay a recording
 
 ```bash

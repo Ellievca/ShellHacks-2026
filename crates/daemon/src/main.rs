@@ -1,8 +1,12 @@
 //! zeroTremor command-line entry point.
 
-use core_engine::{derive_calibration_profile, read_jsonl_reports, CalibrationSegment};
+use core_engine::{
+    derive_calibration_profile, read_jsonl_reports, CalibrationProfile, CalibrationSegment,
+    PersonalizedTremorFilter, PointerFilter,
+};
 use hid_capture::{
-    list_devices, open_device, DeviceSelection, DeviceSelector, JsonlCaptureRecorder,
+    list_devices, open_device, DemoMouseDecoder, DeviceSelection, DeviceSelector,
+    JsonlCaptureRecorder, ReportDecoder,
 };
 use std::env;
 use std::fs::File;
@@ -28,11 +32,70 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "devices" | "list-devices" if rest.is_empty() => print_devices(),
         "capture" | "inspect-device" => capture(parse_capture_request(rest)?),
         "calibrate" => calibrate(rest),
+        "filter" => filter_live(parse_filter_request(rest)?),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
         }
         _ => Err(usage()),
+    }
+}
+
+struct FilterRequest {
+    selection: DeviceSelection,
+    profile_path: String,
+}
+
+fn filter_live(request: FilterRequest) -> Result<(), String> {
+    let opened = open_device(request.selection).map_err(|error| error.to_string())?;
+    let profile_file = File::open(&request.profile_path)
+        .map_err(|error| format!("could not open profile {:?}: {error}", request.profile_path))?;
+    let profile: CalibrationProfile = serde_json::from_reader(profile_file).map_err(|error| {
+        format!(
+            "invalid calibration profile {:?}: {error}",
+            request.profile_path
+        )
+    })?;
+    if profile.device_vendor_id != opened.info.vendor_id
+        || profile.device_product_id != opened.info.product_id
+    {
+        return Err(format!(
+            "profile is for {:04X}:{:04X}, but selected device is {:04X}:{:04X}",
+            profile.device_vendor_id,
+            profile.device_product_id,
+            opened.info.vendor_id,
+            opened.info.product_id
+        ));
+    }
+    let decoder = DemoMouseDecoder;
+    let mut filter = PersonalizedTremorFilter::new(profile);
+    println!(
+        "Filtering {:04X}:{:04X} with {} (Ctrl-C to stop; output is diagnostic only)",
+        opened.info.vendor_id, opened.info.product_id, request.profile_path
+    );
+    println!(
+        "profile: noise_p95={:.2} smoothing={:.2} flick_speed_threshold={:.2}",
+        profile.still_noise_p95, profile.smoothing_strength, profile.flick_speed_threshold
+    );
+    loop {
+        if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
+            let raw = decoder
+                .decode(&report.bytes, report.timestamp_us as u64)
+                .map_err(|error| format!("unsupported report: {error}"))?;
+            let corrected = filter.filter(raw);
+            println!(
+                "timestamp_us={} raw_dx={} raw_dy={} corrected_dx={} corrected_dy={} mode={:?}",
+                raw.timestamp_us,
+                raw.dx,
+                raw.dy,
+                corrected.dx,
+                corrected.dy,
+                filter.last_mode()
+            );
+            std::io::stdout()
+                .flush()
+                .map_err(|error| format!("could not write filter output: {error}"))?;
+        }
     }
 }
 
@@ -182,6 +245,37 @@ fn parse_capture_request(args: &[String]) -> Result<CaptureRequest, String> {
     })
 }
 
+fn parse_filter_request(args: &[String]) -> Result<FilterRequest, String> {
+    let mut path = None;
+    let mut vid = None;
+    let mut pid = None;
+    let mut profile_path = None;
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, value) = args
+            .get(index)
+            .zip(args.get(index + 1))
+            .ok_or("filter options require a value")?;
+        match flag.as_str() {
+            "--path" => path = Some(value.clone()),
+            "--vid" => vid = Some(parse_hex_id(value, "VID")?),
+            "--pid" => pid = Some(parse_hex_id(value, "PID")?),
+            "--profile" => profile_path = Some(value.clone()),
+            _ => return Err(format!("unknown filter option {flag:?}")),
+        }
+        index += 2;
+    }
+    let selection = match (path, vid, pid) {
+        (Some(path), None, None) => DeviceSelection::Path(path),
+        (None, Some(vendor_id), Some(product_id)) => DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id }),
+        _ => return Err("filter requires exactly one device selector: --vid <hex> --pid <hex> or --path <HID path>".into()),
+    };
+    Ok(FilterRequest {
+        selection,
+        profile_path: profile_path.ok_or("filter requires --profile <file>")?,
+    })
+}
+
 fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     match value {
         "still" => Ok(CalibrationSegment::Still),
@@ -202,7 +296,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]
