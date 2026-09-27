@@ -211,6 +211,35 @@ A desktop/native bridge can forward each `replay-filter` report into that
 event contract later. Until that bridge is added, the console is explicitly a
 safe preview rather than a claim of live device telemetry.
 
+### Target-centric browser calibration
+
+The telemetry console also includes **Start calibration**. It begins with a
+center-of-window target, followed by targets of different positions and sizes.
+For every trial it records page-local cursor samples, target geometry,
+click/miss outcome, time-to-target, and the current filter telemetry. The
+result can be downloaded as versioned JSON for model training.
+
+This is valuable because a target supplies a label that raw motion lacks: the
+user’s intended destination. A model can compare the path, speed, reversals,
+overshoot, and final click offset against that known goal. This makes it
+possible to learn whether a reversal was likely corrective intent or noise,
+without training a black box to blindly alter every delta.
+
+Raw mouse reports cannot provide absolute `x/y`: `dx=-2` means “two units
+left,” not “the pointer is at x=-2.” The OS accumulates those relative deltas
+into a cursor position. While a pointer is over the calibration page, the
+browser exposes that resulting position as `clientX/clientY`; the UI converts
+it to coordinates relative to the target area. So the browser knows the
+cursor-to-target relationship even though the HID report itself has no
+position. It cannot observe pointer movement outside its page.
+
+The center target is therefore a useful reference and usability check—it
+verifies the page coordinate frame and captures a standard approach from the
+center—but it does **not** calibrate an absolute physical-mouse origin. For
+real raw-HID training data, the desktop bridge must forward a timestamped
+daemon frame for each report and align it with the browser sample stream in a
+shared monotonic session clock.
+
 ### Replay a recording
 
 ```bash

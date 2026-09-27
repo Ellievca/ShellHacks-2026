@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import './App.css'
 
 type FilterMode = 'Deadband' | 'Smooth' | 'PassThrough' | 'FlickBypass'
 type TelemetryFrame = { timestampUs: number; rawDx: number; rawDy: number; correctedDx: number; correctedDy: number; mode: FilterMode }
 type TelemetryEvent = CustomEvent<TelemetryFrame>
+type CalibrationTarget = { x: number; y: number; size: number; label: string }
+type CalibrationSample = {
+  tMs: number; trial: number; x: number; y: number; areaWidth: number; areaHeight: number; targetX: number; targetY: number; targetSize: number
+  telemetry: Omit<TelemetryFrame, 'timestampUs'>; telemetrySource: 'demo' | 'daemon'
+}
+type CalibrationTrial = { trial: number; target: CalibrationTarget; clickX: number; clickY: number; elapsedMs: number; hit: boolean }
 
 declare global { interface WindowEventMap { 'zerotremor:telemetry': TelemetryEvent } }
 
@@ -16,6 +22,12 @@ const DEMO_FRAMES: TelemetryFrame[] = DEMO_VALUES.map(([step, rawDx, rawDy, corr
 
 const modeLabel: Record<FilterMode, string> = { Deadband: 'Suppressed', Smooth: 'Smoothed', PassThrough: 'Passed through', FlickBypass: 'Flick preserved' }
 const magnitude = (dx: number, dy: number) => Math.hypot(dx, dy)
+const TARGETS: CalibrationTarget[] = [
+  { x: 50, y: 50, size: 58, label: 'Center check' },
+  { x: 18, y: 24, size: 46, label: 'Target 1' }, { x: 82, y: 26, size: 40, label: 'Target 2' },
+  { x: 26, y: 72, size: 34, label: 'Target 3' }, { x: 74, y: 68, size: 30, label: 'Target 4' },
+  { x: 50, y: 20, size: 38, label: 'Target 5' }, { x: 50, y: 81, size: 42, label: 'Target 6' },
+]
 function samplePath(samples: number[]) {
   return samples.map((value, index) => `${index === 0 ? 'M' : 'L'} ${(index / Math.max(samples.length - 1, 1)) * 530} ${60 - value * 9}`).join(' ')
 }
@@ -25,6 +37,12 @@ function App() {
   const [running, setRunning] = useState(false)
   const [demoIndex, setDemoIndex] = useState(1)
   const [source, setSource] = useState<'demo' | 'daemon'>('demo')
+  const [calibrationActive, setCalibrationActive] = useState(false)
+  const [calibrationTrial, setCalibrationTrial] = useState(0)
+  const [calibrationStartedAt, setCalibrationStartedAt] = useState(0)
+  const [calibrationSamples, setCalibrationSamples] = useState<CalibrationSample[]>([])
+  const [calibrationTrials, setCalibrationTrials] = useState<CalibrationTrial[]>([])
+  const lastCalibrationSampleAt = useRef(0)
 
   useEffect(() => {
     const onTelemetry = (event: TelemetryEvent) => { setSource('daemon'); setRunning(true); setFrames((current) => [...current.slice(-59), event.detail]) }
@@ -43,15 +61,67 @@ function App() {
   const correctedTravel = frames.reduce((total, frame) => total + magnitude(frame.correctedDx, frame.correctedDy), 0)
   const reduction = rawTravel === 0 ? 0 : Math.max(0, (1 - correctedTravel / rawTravel) * 100)
   const startDemo = () => { setSource('demo'); setFrames(DEMO_FRAMES.slice(0, 1)); setDemoIndex(1); setRunning(true) }
+  const startCalibration = () => {
+    setCalibrationSamples([])
+    setCalibrationTrials([])
+    setCalibrationTrial(0)
+    setCalibrationStartedAt(performance.now())
+    lastCalibrationSampleAt.current = 0
+    setCalibrationActive(true)
+  }
+  const captureCalibrationSample = (event: MouseEvent<HTMLDivElement>) => {
+    if (!calibrationActive) return
+    const now = performance.now()
+    if (now - lastCalibrationSampleAt.current < 16) return
+    lastCalibrationSampleAt.current = now
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const target = TARGETS[calibrationTrial]
+    setCalibrationSamples((samples) => [...samples, {
+      tMs: now - calibrationStartedAt, trial: calibrationTrial,
+      x: event.clientX - bounds.left, y: event.clientY - bounds.top, areaWidth: bounds.width, areaHeight: bounds.height,
+      targetX: bounds.width * target.x / 100, targetY: bounds.height * target.y / 100, targetSize: target.size,
+      telemetry: { rawDx: current.rawDx, rawDy: current.rawDy, correctedDx: current.correctedDx, correctedDy: current.correctedDy, mode: current.mode }, telemetrySource: source,
+    }])
+  }
+  const recordTargetClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    const bounds = event.currentTarget.parentElement!.getBoundingClientRect()
+    const target = TARGETS[calibrationTrial]
+    setCalibrationTrials((trials) => [...trials, { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: true }])
+    if (calibrationTrial + 1 === TARGETS.length) setCalibrationActive(false)
+    else { setCalibrationTrial((trial) => trial + 1); setCalibrationStartedAt(performance.now()); lastCalibrationSampleAt.current = 0 }
+  }
+  const recordMiss = (event: MouseEvent<HTMLDivElement>) => {
+    if (!calibrationActive || event.target !== event.currentTarget) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const target = TARGETS[calibrationTrial]
+    setCalibrationTrials((trials) => [...trials, { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: false }])
+  }
+  const downloadCalibration = () => {
+    const payload = { schemaVersion: 1, kind: 'target_centric_calibration', capturedAt: new Date().toISOString(), coordinateSpace: 'target_area_relative_pixels', viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio }, device: 'demo-user / 1C4F:0048', trials: calibrationTrials, samples: calibrationSamples }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a'); link.href = url; link.download = 'zerotremor-target-calibration.json'; link.click(); URL.revokeObjectURL(url)
+  }
 
   return <main className="console">
     <header className="topbar">
       <div className="brand"><span className="brand-mark">≈</span><div><p className="eyebrow">zeroTremor / safe validation</p><h1>Movement telemetry</h1></div></div>
-      <div className="session-controls"><span className={`connection ${source}`}><i />{source === 'demo' ? 'Demo feed' : 'Daemon feed'}</span><button className="secondary" type="button" onClick={() => setRunning(false)} disabled={!running}>Pause</button><button type="button" onClick={startDemo}>Run validation preview</button></div>
+      <div className="session-controls"><span className={`connection ${source}`}><i />{source === 'demo' ? 'Demo feed' : 'Daemon feed'}</span><button className="secondary" type="button" onClick={() => setRunning(false)} disabled={!running}>Pause</button><button className="secondary" type="button" onClick={startCalibration}>{calibrationActive ? 'Restart calibration' : 'Start calibration'}</button><button type="button" onClick={startDemo}>Run validation preview</button></div>
     </header>
 
     <section className="pipeline" aria-label="Movement processing pipeline">
       {[['Physical mouse', 'SIGMACHIP · 1C4F:0048', 'ready'], ['HID decoder', '4-byte relative report', 'ready'], ['Personalized filter', current.mode, 'active'], ['Virtual pointer', 'Corrected output only', 'ready']].map(([title, detail, state], index) => <div className="pipeline-piece" key={title}><div className={`node ${state}`}><span>{index + 1}</span></div><div><strong>{title}</strong><small>{detail}</small></div>{index < 3 && <div className="arrow">→</div>}</div>)}
+    </section>
+
+    <section className="panel calibration-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Target-centric calibration</p><h2>Center check → precision targets</h2></div><div className="calibration-actions"><span className="sample-count">{calibrationSamples.length} path samples · {calibrationTrials.filter((trial) => trial.hit).length}/{TARGETS.length} hits</span>{calibrationTrials.length > 0 && <button className="secondary" type="button" onClick={downloadCalibration}>Download training JSON</button>}</div></div>
+      <p className="calibration-copy">The first target is the center of this window. It establishes the browser’s local coordinate frame; subsequent targets label intended destinations, timing, path shape, misses, and filter telemetry.</p>
+      <div className={`target-area ${calibrationActive ? 'active' : ''}`} onMouseMove={captureCalibrationSample} onClick={recordMiss}>
+        {!calibrationActive && calibrationTrials.length === 0 && <div className="calibration-instructions"><strong>Ready for a 7-target calibration.</strong><span>Start with the center target, then click each target naturally.</span><button type="button" onClick={startCalibration}>Begin center check</button></div>}
+        {calibrationActive && <><div className="target-progress">{TARGETS[calibrationTrial].label} · {calibrationTrial + 1}/{TARGETS.length}</div><button className="calibration-target" type="button" aria-label={TARGETS[calibrationTrial].label} onClick={recordTargetClick} style={{ left: `${TARGETS[calibrationTrial].x}%`, top: `${TARGETS[calibrationTrial].y}%`, width: TARGETS[calibrationTrial].size, height: TARGETS[calibrationTrial].size }}><span /></button></>}
+        {!calibrationActive && calibrationTrials.length > 0 && <div className="calibration-instructions complete"><strong>Calibration capture complete.</strong><span>{calibrationSamples.length} browser-path samples and {calibrationTrials.filter((trial) => trial.hit).length} successful target labels are ready to export.</span><button type="button" onClick={startCalibration}>Run again</button></div>}
+      </div>
+      <div className="calibration-footnote"><span>Browser coordinates: page-local x/y from pointer events</span><span>Raw HID coordinates: relative dx/dy, joined by daemon telemetry timestamp</span></div>
     </section>
 
     <section className="dashboard-grid">
