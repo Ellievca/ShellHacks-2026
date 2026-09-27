@@ -6,13 +6,13 @@ Imagine knowing exactly which button you want to click — but your hand physica
 
 For people with essential tremor, Parkinson's disease, and other conditions affecting motor control, everyday web interactions such as clicking links, filling out forms, and navigating menus can become frustrating precision tasks.
 
-### SteadyUI
+### zeroTremor
 
-Our working prototype, **SteadyUI**, is a standalone Chrome extension that adapts webpage interactions to the way an individual user moves.
+Our working prototype, **zeroTremor**, is a standalone Chrome extension that adapts webpage interactions to the way an individual user moves.
 
-SteadyUI begins with a short calibration exercise. As the user moves between targets, it measures pointer-path efficiency, missed clicks, and target-acquisition time to generate a personalized assistance profile.
+zeroTremor begins with a short calibration exercise. As the user moves between targets, it measures pointer-path efficiency, missed clicks, and target-acquisition time to generate a personalized assistance profile.
 
-On any webpage, SteadyUI then:
+On any webpage, zeroTremor then:
 
 - Detects interactive elements such as buttons, links, inputs, and controls.
 - Analyzes pointer trajectory, distance, direction, and approach behavior to estimate the user's intended target.
@@ -23,13 +23,13 @@ The webpage itself does not need to be modified.
 
 ### Synthetic Tremor Testing
 
-To test SteadyUI under repeatable motor-control difficulty, we also built a configurable tremor simulator in Rust.
+To test zeroTremor under repeatable motor-control difficulty, we also built a configurable tremor simulator in Rust.
 
 The simulator produces synthetic tremor-like pointer movement that lets us compare interaction performance under controlled conditions without representing the data as real patient or clinical data.
 
 ### Synthetic Tremor Test Results
 
-| | Without SteadyUI | With SteadyUI |
+| | Without zeroTremor | With zeroTremor |
 |---|---:|---:|
 | Missed targets | 10 | **1** |
 | Average target time | 1.64 s | **1.13 s** |
