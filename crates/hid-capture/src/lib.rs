@@ -172,6 +172,74 @@ fn open_error(selection: DeviceSelection, source: hidapi::HidError) -> CaptureEr
     }
 }
 
+/// Linux-only exclusive grab for the pointer event node associated with a
+/// selected hidraw device. Keeping this guard alive suppresses the physical
+/// device in the desktop input stack; dropping it restores normal input.
+#[cfg(target_os = "linux")]
+pub struct LinuxPointerGrab {
+    _device: evdev::Device,
+    pub event_path: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+pub fn grab_linux_pointer_for_hid_path(hid_path: &str) -> Result<LinuxPointerGrab, String> {
+    use evdev::RelativeAxisCode;
+    use std::path::Path;
+
+    let node = Path::new(hid_path)
+        .file_name()
+        .ok_or_else(|| format!("invalid HID path {hid_path:?}"))?;
+    let sysfs = Path::new("/sys/class/hidraw").join(node).join("device");
+    let mut candidates = Vec::new();
+    find_event_nodes(&sysfs, 5, &mut candidates).map_err(|error| {
+        format!("could not map {hid_path:?} to a Linux input event device: {error}")
+    })?;
+    let mut pointer = None;
+    for path in candidates {
+        let device = match evdev::Device::open(&path) {
+            Ok(device) => device,
+            Err(_) => continue,
+        };
+        let axes = device.supported_relative_axes();
+        if axes.is_some_and(|axes| {
+            axes.contains(RelativeAxisCode::REL_X) && axes.contains(RelativeAxisCode::REL_Y)
+        }) {
+            if pointer.is_some() {
+                return Err(format!("multiple pointer event nodes match {hid_path:?}; select the physical mouse's /dev/input/event* node explicitly (Linux event-path selection will be added next)"));
+            }
+            pointer = Some((path, device));
+        }
+    }
+    let (event_path, mut device) = pointer.ok_or_else(|| format!("no relative pointer event node was found for {hid_path:?}; confirm this is a mouse and that /dev/input/event* permissions are granted"))?;
+    device.grab().map_err(|error| format!("could not exclusively grab {event_path:?}: {error}. Grant the zerotremor group access to this /dev/input/event* node"))?;
+    Ok(LinuxPointerGrab {
+        _device: device,
+        event_path,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn find_event_nodes(
+    path: &std::path::Path,
+    depth: u8,
+    nodes: &mut Vec<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    if depth == 0 {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("event") {
+            nodes.push(std::path::Path::new("/dev/input").join(name));
+        }
+        if entry.file_type()?.is_dir() {
+            find_event_nodes(&entry.path(), depth - 1, nodes)?;
+        }
+    }
+    Ok(())
+}
+
 /// Decodes one raw HID input report into a pointer sample.
 pub trait ReportDecoder {
     type Error;

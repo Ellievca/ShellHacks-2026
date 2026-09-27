@@ -54,6 +54,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "train" => train_model(parse_train_request(rest)?),
         "filter" => filter_live(parse_filter_request(rest)?),
         "replay-filter" => replay_filtered(parse_replay_request(rest)?),
+        "run-linux" => run_linux(parse_linux_live_request(rest)?),
         "bridge" => {
             let request = parse_bridge_request(rest)?;
             bridge::serve(
@@ -91,6 +92,128 @@ struct TrainRequest {
     flick_path: String,
     target_path: Option<String>,
     model_path: String,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxLiveRequest {
+    selection: DeviceSelection,
+    profile_path: String,
+    model_path: String,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_live_request(args: &[String]) -> Result<LinuxLiveRequest, String> {
+    let mut path = None;
+    let mut vid = None;
+    let mut pid = None;
+    let mut profile_path = None;
+    let mut model_path = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--path" => path = Some(value.clone()),
+            "--vid" => vid = Some(parse_hex_id(value, "VID")?),
+            "--pid" => pid = Some(parse_hex_id(value, "PID")?),
+            "--profile" => profile_path = Some(value.clone()),
+            "--model" => model_path = Some(value.clone()),
+            _ => return Err(format!("unknown run-linux option {flag:?}")),
+        };
+        index += 2;
+    }
+    Ok(LinuxLiveRequest {
+        selection: selection_from_parts(path, vid, pid, "run-linux")?,
+        profile_path: profile_path.ok_or("run-linux requires --profile <profile.json>")?,
+        model_path: model_path.ok_or("run-linux requires --model <model.json>")?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux(request: LinuxLiveRequest) -> Result<(), String> {
+    use evdev::KeyCode;
+    use hid_capture::grab_linux_pointer_for_hid_path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let profile: CalibrationProfile =
+        serde_json::from_reader(File::open(&request.profile_path).map_err(|error| {
+            format!("could not open profile {:?}: {error}", request.profile_path)
+        })?)
+        .map_err(|error| format!("invalid profile: {error}"))?;
+    let model: IntentModel = serde_json::from_reader(
+        File::open(&request.model_path)
+            .map_err(|error| format!("could not open model {:?}: {error}", request.model_path))?,
+    )
+    .map_err(|error| format!("invalid model: {error}"))?;
+    let opened = open_device(request.selection).map_err(|error| error.to_string())?;
+    if profile.device_vendor_id != opened.info.vendor_id
+        || profile.device_product_id != opened.info.product_id
+        || model.device_vendor_id != opened.info.vendor_id
+        || model.device_product_id != opened.info.product_id
+    {
+        return Err("profile/model device IDs do not match the selected mouse".into());
+    }
+    let mut sink = LinuxUinputPointerSink::new().map_err(|error| error.to_string())?;
+    let grab = grab_linux_pointer_for_hid_path(&opened.info.path)?;
+    let running = Arc::new(AtomicBool::new(true));
+    let signal_running = Arc::clone(&running);
+    ctrlc::set_handler(move || signal_running.store(false, Ordering::SeqCst))
+        .map_err(|error| format!("could not install Ctrl-C handler: {error}"))?;
+    println!(
+        "zeroTremor Linux live correction enabled; grabbed {:?}. Ctrl-C releases the mouse.",
+        grab.event_path
+    );
+    let decoder = DemoMouseDecoder;
+    let mut filter = PersonalizedTremorFilter::new(profile);
+    let mut previous = None;
+    let mut buttons = 0_u8;
+    while running.load(Ordering::SeqCst) {
+        if let Some(report) = opened
+            .read_raw(100)
+            .map_err(|error| format!("mouse input failed: {error}"))?
+        {
+            let raw = decoder
+                .decode(&report.bytes, report.timestamp_us as u64)
+                .map_err(|error| format!("unsupported report: {error}"))?;
+            let intent = model.predict(raw, previous);
+            previous = Some(raw);
+            let (mut corrected, mut mode) = filter.filter_with_mode(raw);
+            if matches!(intent, Some(core_engine::IntentClass::Flick)) {
+                corrected = raw;
+                mode = FilterMode::FlickBypass;
+            }
+            sink.emit_relative(corrected.dx, corrected.dy)
+                .map_err(|error| error.to_string())?;
+            let next_buttons = report.bytes.first().copied().unwrap_or(0);
+            for (mask, key) in [
+                (1, KeyCode::BTN_LEFT),
+                (2, KeyCode::BTN_RIGHT),
+                (4, KeyCode::BTN_MIDDLE),
+            ] {
+                if (buttons & mask) != (next_buttons & mask) {
+                    sink.emit_button(key, next_buttons & mask != 0)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            buttons = next_buttons;
+            sink.emit_wheel(report.bytes.get(3).copied().unwrap_or(0) as i8)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "raw=({}, {}) corrected=({}, {}) intent={intent:?} mode={mode:?}",
+                raw.dx, raw.dy, corrected.dx, corrected.dy
+            );
+        }
+    }
+    drop(grab);
+    println!("Physical mouse released; normal control restored.");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_linux(_: ()) -> Result<(), String> {
+    Err("run-linux is available only on Linux".into())
 }
 
 fn train_model(request: TrainRequest) -> Result<(), String> {
@@ -856,7 +979,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor train --still <file> --slow <file> --flick <file> [--target <file>] --model <file.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor train --still <file> --slow <file> --flick <file> [--target <file>] --model <file.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run-linux (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json> --model <model.json>\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]

@@ -116,6 +116,7 @@ version = "0.1.0"
 dependencies = [
  "core-engine",
  "ctrlc",
+ "evdev",
  "hid-capture",
  "os-virtual-input",
  "serde_json",
@@ -189,6 +190,7 @@ name = "hid-capture"
 version = "0.1.0"
 dependencies = [
  "core-engine",
+ "evdev",
  "hidapi",
 ]
 

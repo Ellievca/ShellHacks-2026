@@ -87,6 +87,7 @@ sudo usermod -aG zerotremor "$USER"
 
 sudo tee /etc/udev/rules.d/99-zerotremor-mouse.rules >/dev/null <<'EOF'
 SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="1c4f", ATTRS{idProduct}=="0048", GROUP="zerotremor", MODE="0660"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="1c4f", ATTRS{idProduct}=="0048", GROUP="zerotremor", MODE="0660"
 EOF
 
 sudo udevadm control --reload-rules
@@ -96,6 +97,30 @@ sudo udevadm trigger --subsystem-match=hidraw
 Sign out and back in, then unplug/reconnect the mouse. Confirm that
 `id -nG` includes `zerotremor`; after that, run `capture` normally, without
 `sudo`. Do not run `sudo cargo`: root has a separate Rustup environment.
+
+### Linux: live suppression with a profile and model
+
+After training a model and creating the profile from the same mouse, Linux can
+exclusively grab the matching physical pointer event node, apply the model and
+profile, and send only corrected movement to `zeroTremor Virtual Mouse`.
+
+```bash
+cargo run -p daemon -- run-linux \
+  --vid 1c4f --pid 0048 \
+  --profile recordings/demo-user-profile.json \
+  --model models/demo-user-v1.json
+```
+
+`run-linux` first creates the virtual pointer, maps the selected `hidraw`
+device to its `/dev/input/event*` pointer node, and takes an exclusive Linux
+`EVIOCGRAB`. If any step fails, it does not enable correction. While enabled,
+mouse movement, left/right/middle buttons, and the wheel are re-emitted through
+the virtual mouse. Press `Ctrl-C` to release the grab immediately and restore
+normal physical-mouse control. Keep a keyboard available before running it.
+
+This is a Linux hardware integration step and must be tested with the demo
+mouse before relying on it. The model currently classifies flicks for bypass;
+the profile remains the bounded correction policy.
 
 ### Linux: one-time virtual mouse setup
 

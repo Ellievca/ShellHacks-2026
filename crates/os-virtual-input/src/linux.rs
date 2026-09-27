@@ -34,6 +34,7 @@ impl LinuxUinputPointerSink {
         let mut axes = AttributeSet::<RelativeAxisCode>::new();
         axes.insert(RelativeAxisCode::REL_X);
         axes.insert(RelativeAxisCode::REL_Y);
+        axes.insert(RelativeAxisCode::REL_WHEEL);
         // Desktop input stacks use mouse button capabilities, together with
         // REL_X/REL_Y, to classify a uinput device as a pointer.
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -50,6 +51,35 @@ impl LinuxUinputPointerSink {
             .build()
             .map_err(LinuxUinputSinkError::Create)?;
         Ok(Self { device })
+    }
+
+    /// Re-emits a physical mouse button while its source event node is grabbed.
+    pub fn emit_button(
+        &mut self,
+        button: KeyCode,
+        pressed: bool,
+    ) -> Result<(), LinuxUinputSinkError> {
+        self.device
+            .emit(&[InputEvent::new(
+                EventType::KEY.0,
+                button.0,
+                i32::from(pressed),
+            )])
+            .map_err(LinuxUinputSinkError::Emit)
+    }
+
+    /// Re-emits wheel movement while its source event node is grabbed.
+    pub fn emit_wheel(&mut self, delta: i8) -> Result<(), LinuxUinputSinkError> {
+        if delta == 0 {
+            return Ok(());
+        }
+        self.device
+            .emit(&[InputEvent::new(
+                EventType::RELATIVE.0,
+                RelativeAxisCode::REL_WHEEL.0,
+                i32::from(delta),
+            )])
+            .map_err(LinuxUinputSinkError::Emit)
     }
 }
 

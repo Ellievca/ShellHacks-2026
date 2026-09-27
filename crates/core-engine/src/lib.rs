@@ -284,6 +284,53 @@ pub struct IntentModel {
     pub classes: Vec<IntentClassCentroid>,
 }
 
+impl IntentModel {
+    /// Returns the nearest trained intent class for a causal sample window.
+    pub fn predict(
+        &self,
+        sample: PointerSample,
+        previous: Option<PointerSample>,
+    ) -> Option<IntentClass> {
+        if self.feature_mean.len() != 3 || self.feature_stddev.len() != 3 {
+            return None;
+        }
+        let magnitude = magnitude(sample.dx, sample.dy);
+        let dt = previous
+            .map(|value| {
+                sample
+                    .timestamp_us
+                    .saturating_sub(value.timestamp_us)
+                    .max(1)
+            })
+            .unwrap_or(1_000) as f32
+            / 1_000_000.0;
+        let reversal = previous
+            .map(|value| (sample.dx * value.dx + sample.dy * value.dy) < 0.0)
+            .unwrap_or(false) as u8 as f32;
+        let raw = [magnitude, (magnitude / dt).ln_1p(), reversal];
+        let normalized = (0..3)
+            .map(|index| {
+                (raw[index] - self.feature_mean[index]) / self.feature_stddev[index].max(0.0001)
+            })
+            .collect::<Vec<_>>();
+        self.classes
+            .iter()
+            .filter(|class| class.centroid.len() == 3)
+            .min_by(|left, right| {
+                let distance = |class: &IntentClassCentroid| {
+                    class
+                        .centroid
+                        .iter()
+                        .zip(&normalized)
+                        .map(|(a, b)| (a - b).powi(2))
+                        .sum::<f32>()
+                };
+                distance(left).total_cmp(&distance(right))
+            })
+            .map(|class| class.class)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelTrainingError {
     DeviceMismatch,
