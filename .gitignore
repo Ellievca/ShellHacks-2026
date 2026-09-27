@@ -1,0 +1,63 @@
+# =========================
+# Rust
+# =========================
+target/
+**/target/
+
+# Keep Cargo.lock for an application/hackathon project
+# Cargo.lock
+
+# =========================
+# Node / React / Extension
+# =========================
+node_modules/
+**/node_modules/
+
+dist/
+**/dist/
+
+build/
+**/build/
+
+.vite/
+**/.vite/
+
+# =========================
+# macOS
+# =========================
+.DS_Store
+**/.DS_Store
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# Logs
+# =========================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.swp
+*~
+
+# =========================
+# zeroTremor generated recordings
+# =========================
+recordings/*.txt
+recordings/*.log

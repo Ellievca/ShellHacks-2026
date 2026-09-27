@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 core-engine = { path = "../core-engine" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+
 [lib]
 name = "os_virtual_input"
 path = "src/lib.rs"

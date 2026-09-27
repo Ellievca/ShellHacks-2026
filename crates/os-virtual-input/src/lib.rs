@@ -1,11 +1,13 @@
 //! Native pointer-output adapters.
-//!
-//! Linux `uinput` and macOS CoreGraphics implementations belong behind this
-//! crate's common interface and are selected with `cfg(target_os)`.
 
 use core_engine::PointerSink;
 
-/// A sink for local development and replay tests before native output is wired.
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub use macos::{MacOsPointerSink, MacOsSinkError};
+
 #[derive(Debug, Default)]
 pub struct NoopSink;
 
