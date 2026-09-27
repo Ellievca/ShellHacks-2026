@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 core-engine = { path = "../core-engine" }
+hidapi = "2.6"
 
 [lib]
 name = "hid_capture"

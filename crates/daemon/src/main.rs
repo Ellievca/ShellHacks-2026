@@ -1,28 +1,128 @@
 //! zeroTremor command-line entry point.
 
-use core_engine::{PassthroughFilter, PointerFilter, PointerSample, PointerSink};
-use hid_capture::DeviceSelector;
-use os_virtual_input::NoopSink;
+use hid_capture::{list_devices, open_device, DeviceSelection, DeviceSelector};
+use std::env;
+use std::io::Write;
+use std::process::ExitCode;
 
-fn main() {
-    let selector = DeviceSelector {
-        vendor_id: 0x1C4F,
-        product_id: 0x0048,
+fn main() -> ExitCode {
+    match run(env::args().skip(1).collect()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(args: Vec<String>) -> Result<(), String> {
+    let Some((command, rest)) = args.split_first() else {
+        return Err(usage());
     };
-    let mut filter = PassthroughFilter;
-    let mut sink = NoopSink;
-    let sample = PointerSample {
-        dx: 0.0,
-        dy: 0.0,
-        timestamp_us: 0,
-    };
-    let filtered = filter.filter(sample);
+    match command.as_str() {
+        "devices" | "list-devices" if rest.is_empty() => print_devices(),
+        "capture" | "inspect-device" => capture(parse_selection(rest)?),
+        "help" | "--help" | "-h" => {
+            println!("{}", usage());
+            Ok(())
+        }
+        _ => Err(usage()),
+    }
+}
 
-    sink.emit_relative(filtered.dx, filtered.dy)
-        .expect("the development sink cannot fail");
+fn print_devices() -> Result<(), String> {
+    let devices = list_devices().map_err(|error| error.to_string())?;
+    if devices.is_empty() {
+        println!("No HID devices are visible. Check that the mouse is connected and permissions allow HID enumeration.");
+        return Ok(());
+    }
+    println!("VID:PID    Manufacturer                 Product                      Path");
+    for device in devices {
+        println!(
+            "{:04X}:{:04X}  {:<28} {:<28} {}",
+            device.vendor_id,
+            device.product_id,
+            device.manufacturer.as_deref().unwrap_or("<unknown>"),
+            device.product.as_deref().unwrap_or("<unknown>"),
+            device.path
+        );
+    }
+    Ok(())
+}
 
+fn capture(selection: DeviceSelection) -> Result<(), String> {
+    let opened = open_device(selection).map_err(|error| error.to_string())?;
     println!(
-        "zeroTremor workspace initialized (default device {:04X}:{:04X})",
-        selector.vendor_id, selector.product_id
+        "Capturing raw reports from {:04X}:{:04X} {} (Ctrl-C to stop)",
+        opened.info.vendor_id, opened.info.product_id, opened.info.path
     );
+    loop {
+        if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
+            let bytes = report
+                .bytes
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("timestamp_us={} report={bytes}", report.timestamp_us);
+            std::io::stdout()
+                .flush()
+                .map_err(|error| format!("could not write raw report output: {error}"))?;
+        }
+    }
+}
+
+fn parse_selection(args: &[String]) -> Result<DeviceSelection, String> {
+    match args {
+        [flag, value] if flag == "--path" => Ok(DeviceSelection::Path(value.clone())),
+        [vid_flag, vid, pid_flag, pid] if vid_flag == "--vid" && pid_flag == "--pid" => Ok(DeviceSelection::VidPid(DeviceSelector { vendor_id: parse_hex_id(vid, "VID")?, product_id: parse_hex_id(pid, "PID")? })),
+        _ => Err("capture requires exactly `--vid 1c4f --pid 0048` or `--path <HID path>`; use `zero-tremor devices` first".into()),
+    }
+}
+
+fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
+    let value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    u16::from_str_radix(value, 16)
+        .map_err(|_| format!("invalid {label} {value:?}; expected a 1–4 digit hexadecimal value"))
+}
+
+fn usage() -> String {
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture --vid <hex> --pid <hex>\n  zero-tremor capture --path <HID path>\n\nAliases: list-devices, inspect-device".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_vid_pid_with_or_without_prefix() {
+        assert_eq!(
+            parse_selection(&[
+                "--vid".into(),
+                "0x1c4f".into(),
+                "--pid".into(),
+                "0048".into()
+            ])
+            .unwrap(),
+            DeviceSelection::VidPid(DeviceSelector {
+                vendor_id: 0x1c4f,
+                product_id: 0x0048
+            })
+        );
+    }
+
+    #[test]
+    fn requires_one_complete_selector() {
+        assert!(parse_selection(&["--vid".into(), "1c4f".into()]).is_err());
+        assert!(parse_selection(&[
+            "--path".into(),
+            "/dev/hidraw0".into(),
+            "--vid".into(),
+            "1c4f".into()
+        ])
+        .is_err());
+    }
 }
