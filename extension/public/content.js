@@ -6,8 +6,11 @@ const movements = [];
 // Tracks when last mouse movement was recorded
 let lastRecordedTime = 0;
 
-// 20px outside an element will still count as a hit (debug), this will be personalized later
-const HITBOX_EXPANSION = 20;
+// Padding the intent expansion tiers are tuned for; the native profile scales relative to this
+const BASELINE_HITBOX_PADDING = 20;
+
+// Set from the zeroTremor native host's tremor profile once it loads
+let nativeHitboxPadding = BASELINE_HITBOX_PADDING;
 
 // Intent scoring settings
 const INTENT_DISTANCE_LIMIT = 180;
@@ -477,13 +480,60 @@ function rankTargetsByIntent(point, limit = 5) {
     return scored.slice(0, limit);
 }
 
-// Makes hitbox size depend on intent score.
+// Makes hitbox size depend on intent score, scaled by the user's tremor profile.
 function getExpansionByIntent(intentScore) {
-    if (intentScore >= 0.85) return 35;
+    const scale = nativeHitboxPadding / BASELINE_HITBOX_PADDING;
 
-    if (intentScore >= 0.7) return 25;
+    if (intentScore >= 0.85) return 35 * scale;
 
-    if (intentScore >= 0.55) return 15;
+    if (intentScore >= 0.7) return 25 * scale;
+
+    if (intentScore >= 0.55) return 15 * scale;
 
     return 0;
 }
+
+//---------------------------
+// Native Tremor Profile
+//---------------------------
+
+function paddingFromTremorAmplitude(amplitude) {
+    if (amplitude < 3) return 6;
+
+    if (amplitude < 6) return 12;
+
+    if (amplitude < 10) return 20;
+
+    return 28;
+}
+
+function loadZeroTremorProfile() {
+    chrome.runtime.sendMessage(
+        { type: "ZEROTREMOR_GET_PROFILE" },
+        (result) => {
+            if (chrome.runtime.lastError) {
+                console.error("[zeroTremor] Profile request failed:", chrome.runtime.lastError.message);
+                return;
+            }
+
+            if (!result?.ok) {
+                console.error("[zeroTremor] Native engine error:", result?.error);
+                return;
+            }
+
+            const profile = result.response;
+
+            if (typeof profile?.tremorAmplitude !== "number") {
+                console.error("[zeroTremor] Unexpected profile response:", profile);
+                return;
+            }
+
+            nativeHitboxPadding = paddingFromTremorAmplitude(profile.tremorAmplitude);
+
+            console.log("[zeroTremor] Native profile loaded:", profile);
+            console.log("[zeroTremor] Adaptive hitbox padding:", `${nativeHitboxPadding}px`);
+        }
+    );
+}
+
+loadZeroTremorProfile();

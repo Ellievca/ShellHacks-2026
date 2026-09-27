@@ -1,5 +1,9 @@
 //! Platform-neutral pointer processing primitives for zeroTremor.
 
+mod tremor_sim;
+
+pub use tremor_sim::{SimulatedPointerSample, TremorConfig, TremorSimulator};
+
 /// A relative pointer movement decoded from a physical input device.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointerSample {
