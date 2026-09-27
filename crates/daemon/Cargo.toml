@@ -8,3 +8,6 @@ license.workspace = true
 core-engine = { path = "../core-engine" }
 hid-capture = { path = "../hid-capture" }
 os-virtual-input = { path = "../os-virtual-input" }
+
+[dev-dependencies]
+ctrlc = "3"
