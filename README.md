@@ -240,6 +240,32 @@ real raw-HID training data, the desktop bridge must forward a timestamped
 daemon frame for each report and align it with the browser sample stream in a
 shared monotonic session clock.
 
+### Native calibration bridge
+
+Run the native bridge before starting the UI calibration. It binds only to
+`127.0.0.1`, opens the selected HID device only after **Begin center check**,
+and writes one JSONL stream containing the session header, raw reports,
+profile-corrected deltas/modes, and browser target/path events. The UI also
+polls its local telemetry endpoint, so its dashboard changes from demo data to
+the real filter output during calibration.
+
+```bash
+mkdir -p recordings
+cargo run -p daemon -- bridge \
+  --vid 1c4f --pid 0048 \
+  --profile profiles/demo-user.json \
+  --record recordings/target-calibration.jsonl
+```
+
+Leave that terminal running, open the telemetry UI, then select **Start
+calibration** or **Begin center check**. The bridge automatically starts HID
+capture; completing the seventh target stops it and flushes the recording.
+`Ctrl-C` stops the bridge itself. Use `--path <HID path>` for an exact device
+or `--port <port>` if `8765` is already occupied.
+
+The browser extension manifest permits only this loopback address. The bridge
+never binds to the network, invokes Cargo, or sends recordings elsewhere.
+
 ### Replay a recording
 
 ```bash

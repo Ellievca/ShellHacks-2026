@@ -1,5 +1,7 @@
 //! zeroTremor command-line entry point.
 
+mod bridge;
+
 use core_engine::{
     derive_calibration_profile, read_jsonl_reports, CalibrationProfile, CalibrationSegment,
     FilterMode, PersonalizedTremorFilter, PointerFilter, PointerSample, PointerSink,
@@ -42,6 +44,15 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "calibrate" => calibrate(rest),
         "filter" => filter_live(parse_filter_request(rest)?),
         "replay-filter" => replay_filtered(parse_replay_request(rest)?),
+        "bridge" => {
+            let request = parse_bridge_request(rest)?;
+            bridge::serve(
+                request.selection,
+                request.record_path,
+                request.profile_path,
+                request.port,
+            )
+        }
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
@@ -54,6 +65,13 @@ struct ReplayRequest {
     record_path: String,
     profile_path: String,
     dry_run: bool,
+}
+
+struct BridgeRequest {
+    selection: DeviceSelection,
+    record_path: String,
+    profile_path: Option<String>,
+    port: u16,
 }
 
 /// Replays only the filter output from a saved recording. This deliberately
@@ -513,6 +531,49 @@ fn parse_replay_request(args: &[String]) -> Result<ReplayRequest, String> {
     })
 }
 
+fn parse_bridge_request(args: &[String]) -> Result<BridgeRequest, String> {
+    let mut path = None;
+    let mut vid = None;
+    let mut pid = None;
+    let mut record_path = None;
+    let mut profile_path = None;
+    let mut port = 8765;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--path" => path = Some(value.clone()),
+            "--vid" => vid = Some(parse_hex_id(value, "VID")?),
+            "--pid" => pid = Some(parse_hex_id(value, "PID")?),
+            "--record" => record_path = Some(value.clone()),
+            "--profile" => profile_path = Some(value.clone()),
+            "--port" => {
+                port = value
+                    .parse()
+                    .map_err(|_| "--port must be a valid TCP port")?
+            }
+            _ => return Err(format!("unknown bridge option {flag:?}")),
+        }
+        index += 2;
+    }
+    let selection = match (path, vid, pid) {
+        (Some(path), None, None) => DeviceSelection::Path(path),
+        (None, Some(vendor_id), Some(product_id)) => {
+            DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id })
+        }
+        _ => return Err("bridge requires exactly one device selector: --vid <hex> --pid <hex> or --path <HID path>".into()),
+    };
+    Ok(BridgeRequest {
+        selection,
+        record_path: record_path.ok_or("bridge requires --record <file.jsonl>")?,
+        profile_path,
+        port,
+    })
+}
+
 fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     match value {
         "still" => Ok(CalibrationSegment::Still),
@@ -533,7 +594,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]

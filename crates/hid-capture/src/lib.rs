@@ -278,6 +278,9 @@ impl<W: Write> JsonlCaptureRecorder<W> {
             dx: report.bytes[1] as i8,
             dy: report.bytes[2] as i8,
             wheel: report.bytes[3] as i8,
+            corrected_dx: None,
+            corrected_dy: None,
+            filter_mode: None,
         };
         write_jsonl_event(&mut self.writer, &RecordingEvent::Report(event))
     }

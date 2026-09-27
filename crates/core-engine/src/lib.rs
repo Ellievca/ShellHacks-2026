@@ -55,6 +55,23 @@ pub struct RecordedReport {
     pub dx: i8,
     pub dy: i8,
     pub wheel: i8,
+    /// Present when a native calibration bridge applies a profile while it
+    /// captures. Older recordings intentionally omit these fields.
+    #[serde(default)]
+    pub corrected_dx: Option<i8>,
+    #[serde(default)]
+    pub corrected_dy: Option<i8>,
+    #[serde(default)]
+    pub filter_mode: Option<String>,
+}
+
+/// A browser target/path event stamped by the native bridge's session clock.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TargetCalibrationEvent {
+    /// Monotonic microseconds since the native capture session began.
+    pub t_us: u64,
+    /// UI-owned details such as cursor point, target geometry, and hit/miss.
+    pub data: serde_json::Value,
 }
 
 /// One JSON Lines record. New variants can be added without changing old logs.
@@ -63,6 +80,7 @@ pub struct RecordedReport {
 pub enum RecordingEvent {
     Session(RecordingSession),
     Report(RecordedReport),
+    TargetCalibration(TargetCalibrationEvent),
 }
 
 #[derive(Debug)]
@@ -265,6 +283,9 @@ mod tests {
             dx,
             dy,
             wheel: 0,
+            corrected_dx: None,
+            corrected_dy: None,
+            filter_mode: None,
         }
     }
 

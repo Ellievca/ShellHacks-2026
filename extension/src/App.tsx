@@ -42,7 +42,9 @@ function App() {
   const [calibrationStartedAt, setCalibrationStartedAt] = useState(0)
   const [calibrationSamples, setCalibrationSamples] = useState<CalibrationSample[]>([])
   const [calibrationTrials, setCalibrationTrials] = useState<CalibrationTrial[]>([])
+  const [bridgeStatus, setBridgeStatus] = useState('Bridge offline')
   const lastCalibrationSampleAt = useRef(0)
+  const lastBridgeTimestamp = useRef(0)
 
   useEffect(() => {
     const onTelemetry = (event: TelemetryEvent) => { setSource('daemon'); setRunning(true); setFrames((current) => [...current.slice(-59), event.detail]) }
@@ -54,6 +56,22 @@ function App() {
     const interval = window.setInterval(() => { setFrames((current) => [...current.slice(-59), DEMO_FRAMES[demoIndex]]); setDemoIndex((index) => (index + 1) % DEMO_FRAMES.length) }, 650)
     return () => window.clearInterval(interval)
   }, [demoIndex, running, source])
+  useEffect(() => {
+    if (!calibrationActive) return undefined
+    const poll = async () => {
+      try {
+        const frame = await (await fetch('http://127.0.0.1:8765/v1/telemetry')).json() as Partial<TelemetryFrame> & { active?: boolean }
+        if (frame.active && typeof frame.timestampUs === 'number' && frame.timestampUs !== lastBridgeTimestamp.current && typeof frame.rawDx === 'number' && typeof frame.rawDy === 'number' && typeof frame.correctedDx === 'number' && typeof frame.correctedDy === 'number' && typeof frame.mode === 'string') {
+          lastBridgeTimestamp.current = frame.timestampUs
+          setSource('daemon')
+          setFrames((current) => [...current.slice(-59), frame as TelemetryFrame])
+        }
+      } catch { setBridgeStatus('Bridge connection lost') }
+    }
+    void poll()
+    const interval = window.setInterval(() => { void poll() }, 40)
+    return () => window.clearInterval(interval)
+  }, [calibrationActive])
 
   const current = frames.at(-1) ?? DEMO_FRAMES[0]
   const counts = useMemo(() => frames.reduce<Record<FilterMode, number>>((total, frame) => ({ ...total, [frame.mode]: total[frame.mode] + 1 }), { Deadband: 0, Smooth: 0, PassThrough: 0, FlickBypass: 0 }), [frames])
@@ -61,12 +79,20 @@ function App() {
   const correctedTravel = frames.reduce((total, frame) => total + magnitude(frame.correctedDx, frame.correctedDy), 0)
   const reduction = rawTravel === 0 ? 0 : Math.max(0, (1 - correctedTravel / rawTravel) * 100)
   const startDemo = () => { setSource('demo'); setFrames(DEMO_FRAMES.slice(0, 1)); setDemoIndex(1); setRunning(true) }
-  const startCalibration = () => {
+  const postBridge = async (path: string, data?: unknown) => {
+    const response = await fetch(`http://127.0.0.1:8765${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) })
+    const result = await response.json() as { ok: boolean; error?: string }
+    if (!result.ok) throw new Error(result.error ?? 'native bridge rejected the request')
+  }
+  const startCalibration = async () => {
+    try { await postBridge('/v1/session/start'); setBridgeStatus('Native capture active') }
+    catch (error) { setBridgeStatus(error instanceof Error ? error.message : 'Bridge offline'); return }
     setCalibrationSamples([])
     setCalibrationTrials([])
     setCalibrationTrial(0)
     setCalibrationStartedAt(performance.now())
     lastCalibrationSampleAt.current = 0
+    lastBridgeTimestamp.current = 0
     setCalibrationActive(true)
   }
   const captureCalibrationSample = (event: MouseEvent<HTMLDivElement>) => {
@@ -76,26 +102,32 @@ function App() {
     lastCalibrationSampleAt.current = now
     const bounds = event.currentTarget.getBoundingClientRect()
     const target = TARGETS[calibrationTrial]
-    setCalibrationSamples((samples) => [...samples, {
+    const sample = {
       tMs: now - calibrationStartedAt, trial: calibrationTrial,
       x: event.clientX - bounds.left, y: event.clientY - bounds.top, areaWidth: bounds.width, areaHeight: bounds.height,
       targetX: bounds.width * target.x / 100, targetY: bounds.height * target.y / 100, targetSize: target.size,
       telemetry: { rawDx: current.rawDx, rawDy: current.rawDy, correctedDx: current.correctedDx, correctedDy: current.correctedDy, mode: current.mode }, telemetrySource: source,
-    }])
+    }
+    setCalibrationSamples((samples) => [...samples, sample])
+    void postBridge('/v1/event', { kind: 'pointer_sample', ...sample }).catch(() => setBridgeStatus('Bridge connection lost'))
   }
   const recordTargetClick = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation()
     const bounds = event.currentTarget.parentElement!.getBoundingClientRect()
     const target = TARGETS[calibrationTrial]
-    setCalibrationTrials((trials) => [...trials, { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: true }])
-    if (calibrationTrial + 1 === TARGETS.length) setCalibrationActive(false)
+    const trial = { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: true }
+    setCalibrationTrials((trials) => [...trials, trial])
+    void postBridge('/v1/event', { kind: 'target_click', ...trial }).catch(() => setBridgeStatus('Bridge connection lost'))
+    if (calibrationTrial + 1 === TARGETS.length) { setCalibrationActive(false); void postBridge('/v1/session/stop').catch(() => setBridgeStatus('Bridge connection lost')) }
     else { setCalibrationTrial((trial) => trial + 1); setCalibrationStartedAt(performance.now()); lastCalibrationSampleAt.current = 0 }
   }
   const recordMiss = (event: MouseEvent<HTMLDivElement>) => {
     if (!calibrationActive || event.target !== event.currentTarget) return
     const bounds = event.currentTarget.getBoundingClientRect()
     const target = TARGETS[calibrationTrial]
-    setCalibrationTrials((trials) => [...trials, { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: false }])
+    const trial = { trial: calibrationTrial, target, clickX: event.clientX - bounds.left, clickY: event.clientY - bounds.top, elapsedMs: performance.now() - calibrationStartedAt, hit: false }
+    setCalibrationTrials((trials) => [...trials, trial])
+    void postBridge('/v1/event', { kind: 'target_miss', ...trial }).catch(() => setBridgeStatus('Bridge connection lost'))
   }
   const downloadCalibration = () => {
     const payload = { schemaVersion: 1, kind: 'target_centric_calibration', capturedAt: new Date().toISOString(), coordinateSpace: 'target_area_relative_pixels', viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio }, device: 'demo-user / 1C4F:0048', trials: calibrationTrials, samples: calibrationSamples }
@@ -106,7 +138,7 @@ function App() {
   return <main className="console">
     <header className="topbar">
       <div className="brand"><span className="brand-mark">≈</span><div><p className="eyebrow">zeroTremor / safe validation</p><h1>Movement telemetry</h1></div></div>
-      <div className="session-controls"><span className={`connection ${source}`}><i />{source === 'demo' ? 'Demo feed' : 'Daemon feed'}</span><button className="secondary" type="button" onClick={() => setRunning(false)} disabled={!running}>Pause</button><button className="secondary" type="button" onClick={startCalibration}>{calibrationActive ? 'Restart calibration' : 'Start calibration'}</button><button type="button" onClick={startDemo}>Run validation preview</button></div>
+      <div className="session-controls"><span className={`connection ${source}`}><i />{source === 'demo' ? 'Demo feed' : 'Daemon feed'}</span><button className="secondary" type="button" onClick={() => setRunning(false)} disabled={!running}>Pause</button><button className="secondary" type="button" onClick={() => void startCalibration()}>{calibrationActive ? 'Restart calibration' : 'Start calibration'}</button><button type="button" onClick={startDemo}>Run validation preview</button></div>
     </header>
 
     <section className="pipeline" aria-label="Movement processing pipeline">
@@ -114,10 +146,10 @@ function App() {
     </section>
 
     <section className="panel calibration-panel">
-      <div className="panel-heading"><div><p className="eyebrow">Target-centric calibration</p><h2>Center check → precision targets</h2></div><div className="calibration-actions"><span className="sample-count">{calibrationSamples.length} path samples · {calibrationTrials.filter((trial) => trial.hit).length}/{TARGETS.length} hits</span>{calibrationTrials.length > 0 && <button className="secondary" type="button" onClick={downloadCalibration}>Download training JSON</button>}</div></div>
+      <div className="panel-heading"><div><p className="eyebrow">Target-centric calibration</p><h2>Center check → precision targets</h2></div><div className="calibration-actions"><span className="sample-count">{bridgeStatus} · {calibrationSamples.length} samples · {calibrationTrials.filter((trial) => trial.hit).length}/{TARGETS.length} hits</span>{calibrationTrials.length > 0 && <button className="secondary" type="button" onClick={downloadCalibration}>Download training JSON</button>}</div></div>
       <p className="calibration-copy">The first target is the center of this window. It establishes the browser’s local coordinate frame; subsequent targets label intended destinations, timing, path shape, misses, and filter telemetry.</p>
       <div className={`target-area ${calibrationActive ? 'active' : ''}`} onMouseMove={captureCalibrationSample} onClick={recordMiss}>
-        {!calibrationActive && calibrationTrials.length === 0 && <div className="calibration-instructions"><strong>Ready for a 7-target calibration.</strong><span>Start with the center target, then click each target naturally.</span><button type="button" onClick={startCalibration}>Begin center check</button></div>}
+        {!calibrationActive && calibrationTrials.length === 0 && <div className="calibration-instructions"><strong>Ready for a 7-target calibration.</strong><span>Start the native bridge, then click to begin with the center target.</span><button type="button" onClick={() => void startCalibration()}>Begin center check</button></div>}
         {calibrationActive && <><div className="target-progress">{TARGETS[calibrationTrial].label} · {calibrationTrial + 1}/{TARGETS.length}</div><button className="calibration-target" type="button" aria-label={TARGETS[calibrationTrial].label} onClick={recordTargetClick} style={{ left: `${TARGETS[calibrationTrial].x}%`, top: `${TARGETS[calibrationTrial].y}%`, width: TARGETS[calibrationTrial].size, height: TARGETS[calibrationTrial].size }}><span /></button></>}
         {!calibrationActive && calibrationTrials.length > 0 && <div className="calibration-instructions complete"><strong>Calibration capture complete.</strong><span>{calibrationSamples.length} browser-path samples and {calibrationTrials.filter((trial) => trial.hit).length} successful target labels are ready to export.</span><button type="button" onClick={startCalibration}>Run again</button></div>}
       </div>
