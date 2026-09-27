@@ -3,9 +3,13 @@
 //! HID paths are opaque operating-system identifiers. They are printed only
 //! for selection and are deliberately not interpreted as filesystem paths.
 
-use core_engine::PointerSample;
+use core_engine::{
+    write_jsonl_event, CalibrationSegment, PointerSample, RecordedReport, RecordingDevice,
+    RecordingEvent, RecordingSession,
+};
 use hidapi::{HidApi, HidDevice};
 use std::fmt;
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Metadata used to select a physical HID device.
@@ -173,4 +177,108 @@ pub trait ReportDecoder {
     type Error;
 
     fn decode(&self, report: &[u8], timestamp_us: u64) -> Result<PointerSample, Self::Error>;
+}
+
+/// The observed report layout of the shared SIGMACHIP `1C4F:0048` demo mouse.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DemoMouseDecoder;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DemoMouseDecodeError {
+    UnsupportedLength(usize),
+}
+
+impl fmt::Display for DemoMouseDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedLength(length) => write!(
+                f,
+                "expected the demo mouse's four-byte report, received {length} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DemoMouseDecodeError {}
+
+impl ReportDecoder for DemoMouseDecoder {
+    type Error = DemoMouseDecodeError;
+
+    fn decode(&self, report: &[u8], timestamp_us: u64) -> Result<PointerSample, Self::Error> {
+        if report.len() != 4 {
+            return Err(DemoMouseDecodeError::UnsupportedLength(report.len()));
+        }
+        Ok(PointerSample {
+            dx: report[1] as i8 as f32,
+            dy: report[2] as i8 as f32,
+            timestamp_us,
+        })
+    }
+}
+
+/// Streams raw reports and their demo-mouse decoding into a portable JSONL file.
+pub struct JsonlCaptureRecorder<W: Write> {
+    writer: W,
+    started_at_us: u128,
+    sequence: u64,
+}
+
+impl<W: Write> JsonlCaptureRecorder<W> {
+    pub fn new(
+        mut writer: W,
+        device: &HidDeviceInfo,
+        segment: CalibrationSegment,
+    ) -> Result<Self, core_engine::RecordingError> {
+        let started_at_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| core_engine::RecordingError::Io(std::io::Error::other(error)))?
+            .as_micros();
+        let session = RecordingSession {
+            schema_version: 1,
+            platform: std::env::consts::OS.into(),
+            device: RecordingDevice {
+                vendor_id: device.vendor_id,
+                product_id: device.product_id,
+                manufacturer: device.manufacturer.clone(),
+                product: device.product.clone(),
+                hid_path: Some(device.path.clone()),
+            },
+            report_layout: "sigmachip_1c4f_0048_v1".into(),
+            segment,
+        };
+        write_jsonl_event(&mut writer, &RecordingEvent::Session(session))?;
+        Ok(Self {
+            writer,
+            started_at_us,
+            sequence: 0,
+        })
+    }
+
+    pub fn record(&mut self, report: &RawInputReport) -> Result<(), core_engine::RecordingError> {
+        if report.bytes.len() != 4 {
+            return Err(core_engine::RecordingError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported report: expected 4 bytes, received {}",
+                    report.bytes.len()
+                ),
+            )));
+        }
+        self.sequence += 1;
+        let event = RecordedReport {
+            seq: self.sequence,
+            t_us: report.timestamp_us.saturating_sub(self.started_at_us) as u64,
+            raw_hex: report
+                .bytes
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            buttons: report.bytes[0],
+            dx: report.bytes[1] as i8,
+            dy: report.bytes[2] as i8,
+            wheel: report.bytes[3] as i8,
+        };
+        write_jsonl_event(&mut self.writer, &RecordingEvent::Report(event))
+    }
 }

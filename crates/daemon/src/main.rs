@@ -1,7 +1,12 @@
 //! zeroTremor command-line entry point.
 
-use hid_capture::{list_devices, open_device, DeviceSelection, DeviceSelector};
+use core_engine::{derive_calibration_profile, read_jsonl_reports, CalibrationSegment};
+use hid_capture::{
+    list_devices, open_device, DeviceSelection, DeviceSelector, JsonlCaptureRecorder,
+};
 use std::env;
+use std::fs::File;
+use std::io::BufReader;
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -21,7 +26,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
     };
     match command.as_str() {
         "devices" | "list-devices" if rest.is_empty() => print_devices(),
-        "capture" | "inspect-device" => capture(parse_selection(rest)?),
+        "capture" | "inspect-device" => capture(parse_capture_request(rest)?),
+        "calibrate" => calibrate(rest),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
@@ -50,14 +56,37 @@ fn print_devices() -> Result<(), String> {
     Ok(())
 }
 
-fn capture(selection: DeviceSelection) -> Result<(), String> {
-    let opened = open_device(selection).map_err(|error| error.to_string())?;
+struct CaptureRequest {
+    selection: DeviceSelection,
+    record_path: Option<String>,
+    segment: CalibrationSegment,
+}
+
+fn capture(request: CaptureRequest) -> Result<(), String> {
+    let opened = open_device(request.selection).map_err(|error| error.to_string())?;
+    let mut recorder = match request.record_path {
+        Some(path) => Some(
+            JsonlCaptureRecorder::new(
+                File::create(&path)
+                    .map_err(|error| format!("could not create recording {path:?}: {error}"))?,
+                &opened.info,
+                request.segment,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        None => None,
+    };
     println!(
         "Capturing raw reports from {:04X}:{:04X} {} (Ctrl-C to stop)",
         opened.info.vendor_id, opened.info.product_id, opened.info.path
     );
     loop {
         if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
+            if let Some(recorder) = recorder.as_mut() {
+                recorder
+                    .record(&report)
+                    .map_err(|error| error.to_string())?;
+            }
             let bytes = report
                 .bytes
                 .iter()
@@ -72,11 +101,94 @@ fn capture(selection: DeviceSelection) -> Result<(), String> {
     }
 }
 
-fn parse_selection(args: &[String]) -> Result<DeviceSelection, String> {
-    match args {
-        [flag, value] if flag == "--path" => Ok(DeviceSelection::Path(value.clone())),
-        [vid_flag, vid, pid_flag, pid] if vid_flag == "--vid" && pid_flag == "--pid" => Ok(DeviceSelection::VidPid(DeviceSelector { vendor_id: parse_hex_id(vid, "VID")?, product_id: parse_hex_id(pid, "PID")? })),
-        _ => Err("capture requires exactly `--vid 1c4f --pid 0048` or `--path <HID path>`; use `zero-tremor devices` first".into()),
+fn calibrate(args: &[String]) -> Result<(), String> {
+    let mut still = None;
+    let mut slow = None;
+    let mut flick = None;
+    let mut profile_path = None;
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, value) = args
+            .get(index)
+            .zip(args.get(index + 1))
+            .ok_or("calibrate options require a path")?;
+        match flag.as_str() {
+            "--still" => still = Some(value),
+            "--slow" => slow = Some(value),
+            "--flick" => flick = Some(value),
+            "--profile" => profile_path = Some(value),
+            _ => return Err(format!("unknown calibrate option {flag:?}")),
+        }
+        index += 2;
+    }
+    let load = |path: &String| {
+        let file = File::open(path)
+            .map_err(|error| format!("could not open calibration recording {path:?}: {error}"))?;
+        read_jsonl_reports(BufReader::new(file)).map_err(|error| error.to_string())
+    };
+    let still = load(still.ok_or("calibrate requires --still <file>")?)?;
+    let slow = load(slow.ok_or("calibrate requires --slow <file>")?)?;
+    let flick = load(flick.ok_or("calibrate requires --flick <file>")?)?;
+    let profile = derive_calibration_profile(
+        (&still.0, &still.1),
+        (&slow.0, &slow.1),
+        (&flick.0, &flick.1),
+    )
+    .map_err(|error| error.to_string())?;
+    let output = profile_path.ok_or("calibrate requires --profile <file>")?;
+    let file = File::create(output)
+        .map_err(|error| format!("could not create profile {output:?}: {error}"))?;
+    serde_json::to_writer_pretty(file, &profile)
+        .map_err(|error| format!("could not write profile {output:?}: {error}"))?;
+    println!("Saved personalized calibration profile to {output}");
+    println!(
+        "noise_p95={:.2} smoothing={:.2} flick_threshold={:.2}",
+        profile.still_noise_p95, profile.smoothing_strength, profile.flick_speed_threshold
+    );
+    Ok(())
+}
+
+fn parse_capture_request(args: &[String]) -> Result<CaptureRequest, String> {
+    let mut path = None;
+    let mut vid = None;
+    let mut pid = None;
+    let mut record_path = None;
+    let mut segment = CalibrationSegment::General;
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, value) = args
+            .get(index)
+            .zip(args.get(index + 1))
+            .ok_or("capture options require a value")?;
+        match flag.as_str() {
+            "--path" => path = Some(value.clone()),
+            "--vid" => vid = Some(parse_hex_id(value, "VID")?),
+            "--pid" => pid = Some(parse_hex_id(value, "PID")?),
+            "--record" => record_path = Some(value.clone()),
+            "--segment" => segment = parse_segment(value)?,
+            _ => return Err(format!("unknown capture option {flag:?}")),
+        }
+        index += 2;
+    }
+    let selection = match (path, vid, pid) {
+        (Some(path), None, None) => DeviceSelection::Path(path),
+        (None, Some(vendor_id), Some(product_id)) => DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id }),
+        _ => return Err("capture requires exactly `--vid 1c4f --pid 0048` or `--path <HID path>`; use `zero-tremor devices` first".into()),
+    };
+    Ok(CaptureRequest {
+        selection,
+        record_path,
+        segment,
+    })
+}
+
+fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
+    match value {
+        "still" => Ok(CalibrationSegment::Still),
+        "slow" => Ok(CalibrationSegment::SlowIntentional),
+        "flick" => Ok(CalibrationSegment::Flick),
+        "general" => Ok(CalibrationSegment::General),
+        _ => Err("invalid segment; use still, slow, flick, or general".into()),
     }
 }
 
@@ -90,7 +202,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture --vid <hex> --pid <hex>\n  zero-tremor capture --path <HID path>\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]
@@ -100,13 +212,14 @@ mod tests {
     #[test]
     fn parses_vid_pid_with_or_without_prefix() {
         assert_eq!(
-            parse_selection(&[
+            parse_capture_request(&[
                 "--vid".into(),
                 "0x1c4f".into(),
                 "--pid".into(),
                 "0048".into()
             ])
-            .unwrap(),
+            .unwrap()
+            .selection,
             DeviceSelection::VidPid(DeviceSelector {
                 vendor_id: 0x1c4f,
                 product_id: 0x0048
@@ -116,8 +229,8 @@ mod tests {
 
     #[test]
     fn requires_one_complete_selector() {
-        assert!(parse_selection(&["--vid".into(), "1c4f".into()]).is_err());
-        assert!(parse_selection(&[
+        assert!(parse_capture_request(&["--vid".into(), "1c4f".into()]).is_err());
+        assert!(parse_capture_request(&[
             "--path".into(),
             "/dev/hidraw0".into(),
             "--vid".into(),

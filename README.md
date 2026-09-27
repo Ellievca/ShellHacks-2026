@@ -63,6 +63,45 @@ mkdir -p recordings
 cargo run -p daemon -- capture --vid 1c4f --pid 0048 | tee recordings/mouse_demo.txt
 ```
 
+### Personalized calibration recordings
+
+`--record` writes a versioned, OS-neutral JSON Lines (`.jsonl`) recording.
+Every file begins with device and report-layout metadata, followed by
+timestamped raw reports and decoded buttons, `dx`, `dy`, and wheel values.
+The HID path is stored only as local metadata, so the same recording can be
+read on Linux and macOS.
+
+```json
+{"type":"session","schema_version":1,"platform":"linux","device":{"vendor_id":7231,"product_id":72,"hid_path":"/dev/hidraw1"},"report_layout":"sigmachip_1c4f_0048_v1","segment":"still"}
+{"type":"report","seq":1,"t_us":0,"raw_hex":"00 FE 00 00","buttons":0,"dx":-2,"dy":0,"wheel":0}
+```
+
+`t_us` is monotonic microseconds since that recording started, which makes it
+portable replay timing; it is not an OS-specific clock or cursor position.
+
+Record these three short sessions with the same demo mouse:
+
+```bash
+mkdir -p recordings profiles
+# Hold the mouse still for 10 seconds, then Ctrl-C.
+cargo run -p daemon -- capture --vid 1c4f --pid 0048 --record recordings/still.jsonl --segment still
+# Move slowly and deliberately in several directions, then Ctrl-C.
+cargo run -p daemon -- capture --vid 1c4f --pid 0048 --record recordings/slow.jsonl --segment slow
+# Make several normal fast flicks, then Ctrl-C.
+cargo run -p daemon -- capture --vid 1c4f --pid 0048 --record recordings/flick.jsonl --segment flick
+
+cargo run -p daemon -- calibrate \
+  --still recordings/still.jsonl \
+  --slow recordings/slow.jsonl \
+  --flick recordings/flick.jsonl \
+  --profile profiles/demo-user.json
+```
+
+The generated profile stores the device model, still-hold noise percentile,
+slow-motion and flick speeds, a smoothing strength, and a flick-bypass
+threshold. It is an explainable baseline for personalization; future filtering
+uses these values rather than assuming every user has the same tremor pattern.
+
 ### Replay a recording
 
 ```bash
