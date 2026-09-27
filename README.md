@@ -76,6 +76,26 @@ the desktop cursor. The virtual device advertises standard left/right/middle
 mouse-button capabilities so Linux desktop input stacks classify it as a
 pointer.
 
+### How one replay command selects the correct OS backend
+
+The replay command is identical on both supported platforms:
+
+```bash
+cargo run -p daemon --example replay_mouse -- recordings/mouse_demo.txt
+```
+
+Rust selects the sink at compile time using `cfg(target_os)`:
+
+```text
+Linux  → LinuxUinputPointerSink → /dev/uinput virtual mouse
+macOS  → MacOsPointerSink       → CoreGraphics pointer events
+```
+
+Only the backend for the machine being built is compiled. A Linux build does
+not include the macOS CoreGraphics code, and a macOS build does not include
+the Linux `uinput` code. The shared capture decoding, replay timing, and
+future tremor filter remain the same on both platforms.
+
 ## Concepts and terms
 
 The project separates reading a mouse from deciding what to do with its
