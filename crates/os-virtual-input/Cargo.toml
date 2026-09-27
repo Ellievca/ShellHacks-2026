@@ -1,0 +1,12 @@
+[package]
+name = "os-virtual-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-engine = { path = "../core-engine" }
+
+[lib]
+name = "os_virtual_input"
+path = "src/lib.rs"

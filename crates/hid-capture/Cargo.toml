@@ -1,0 +1,12 @@
+[package]
+name = "hid-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+core-engine = { path = "../core-engine" }
+
+[lib]
+name = "hid_capture"
+path = "src/lib.rs"
