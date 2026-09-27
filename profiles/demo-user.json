@@ -3,9 +3,10 @@
   "device_vendor_id": 7247,
   "device_product_id": 72,
   "still_noise_p95": 3.1622777,
+  "deadband_threshold": 0.75,
   "slow_speed_p50": 62.48438,
   "flick_speed_p10": 125.3447,
   "reversal_window_ms": 45,
-  "smoothing_strength": 0.15,
+  "smoothing_strength": 0.35,
   "flick_speed_threshold": 94.00853
 }
