@@ -4,7 +4,8 @@ members = [
     "crates/core-engine",
     "crates/hid-capture",
     "crates/os-virtual-input",
-    "crates/daemon",
+    "crates/daemon", 
+    "crates/native-host",
 ]
 
 [workspace.package]
