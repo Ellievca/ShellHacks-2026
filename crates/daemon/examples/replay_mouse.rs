@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use core_engine::{PassthroughFilter, PointerFilter, PointerSample, PointerSink};
+use hid_capture::MouseReport;
 
 #[cfg(target_os = "linux")]
 use os_virtual_input::LinuxUinputPointerSink;
@@ -23,24 +24,11 @@ fn parse_capture_line(line: &str) -> Option<PointerSample> {
         .filter_map(|byte| u8::from_str_radix(byte, 16).ok())
         .collect();
 
-    if bytes.len() < 3 {
-        return None;
-    }
-
-    // Sigmachip 1C4F:0048 report layout observed during PER-35:
-    //
-    // byte 0 = buttons
-    // byte 1 = relative X
-    // byte 2 = relative Y
-    // byte 3 = wheel
-    //
-    // dx/dy are signed 8-bit values.
-    let dx = bytes[1] as i8 as f32;
-    let dy = bytes[2] as i8 as f32;
+    let report = MouseReport::decode(&bytes)?;
 
     Some(PointerSample {
-        dx,
-        dy,
+        dx: report.dx,
+        dy: report.dy,
         timestamp_us,
     })
 }
