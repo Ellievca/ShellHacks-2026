@@ -491,4 +491,31 @@ mod filter_tests {
         });
         assert_eq!(mode, FilterMode::Smooth);
     }
+
+    #[test]
+    fn a_fast_small_step_is_not_a_flick() {
+        let profile = CalibrationProfile {
+            schema_version: 1,
+            device_vendor_id: 0x1c4f,
+            device_product_id: 0x0048,
+            still_noise_p95: 0.5,
+            slow_speed_p50: 1.0,
+            flick_speed_p10: 10.0,
+            reversal_window_ms: 45,
+            smoothing_strength: 0.5,
+            flick_speed_threshold: 5.0,
+        };
+        let mut filter = PersonalizedTremorFilter::new(profile);
+        filter.filter_with_mode(PointerSample {
+            dx: 1.0,
+            dy: 0.0,
+            timestamp_us: 0,
+        });
+        let (_, mode) = filter.filter_with_mode(PointerSample {
+            dx: -2.0,
+            dy: 1.0,
+            timestamp_us: 8_000,
+        });
+        assert_ne!(mode, FilterMode::FlickBypass);
+    }
 }

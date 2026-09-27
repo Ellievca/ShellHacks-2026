@@ -68,7 +68,6 @@ fn filter_live(request: FilterRequest) -> Result<(), String> {
         ));
     }
     let decoder = DemoMouseDecoder;
-    let mut filter = PersonalizedTremorFilter::new(profile);
     println!(
         "Filtering {:04X}:{:04X} with {} (Ctrl-C to stop; output is diagnostic only)",
         opened.info.vendor_id, opened.info.product_id, request.profile_path
@@ -77,6 +76,7 @@ fn filter_live(request: FilterRequest) -> Result<(), String> {
         "profile: noise_p95={:.2} smoothing={:.2} flick_speed_threshold={:.2}",
         profile.still_noise_p95, profile.smoothing_strength, profile.flick_speed_threshold
     );
+    let mut filter = PersonalizedTremorFilter::new(profile);
     loop {
         if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
             let raw = decoder

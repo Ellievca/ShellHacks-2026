@@ -117,7 +117,9 @@ suppresses movement below the measured still-hold noise; `Smooth` reduces
 small rapid reversals; `FlickBypass` preserves a fast intentional flick; and
 `PassThrough` leaves likely intentional movement unchanged. The same profile
 will later feed the native Linux/macOS pointer sink after the correction is
-validated.
+validated. Flick bypass requires both a high measured speed and a meaningful
+single-report displacement, so a tiny movement in a very short report interval
+is not accidentally treated as a fast flick.
 
 ### Replay a recording
 
