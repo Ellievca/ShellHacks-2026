@@ -240,6 +240,35 @@ fn find_event_nodes(
     Ok(())
 }
 
+/// One decoded report from a boot-protocol-style mouse such as the Sigmachip
+/// 1C4F:0048 (layout observed during PER-35).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MouseReport {
+    /// Bit 0 left, bit 1 right, bit 2 middle.
+    pub buttons: u8,
+    pub dx: f32,
+    pub dy: f32,
+    /// Positive scrolls up.
+    pub wheel: i8,
+}
+
+impl MouseReport {
+    /// byte 0 = buttons, bytes 1/2 = signed relative X/Y, byte 3 = optional
+    /// signed wheel. Returns `None` for reports shorter than three bytes.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let [buttons, dx, dy, rest @ ..] = bytes else {
+            return None;
+        };
+
+        Some(Self {
+            buttons: *buttons,
+            dx: *dx as i8 as f32,
+            dy: *dy as i8 as f32,
+            wheel: rest.first().map_or(0, |&wheel| wheel as i8),
+        })
+    }
+}
+
 /// Decodes one raw HID input report into a pointer sample.
 pub trait ReportDecoder {
     type Error;

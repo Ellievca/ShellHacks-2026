@@ -8,6 +8,11 @@
     "default_title": "Open SteadyUI Calibration"
   },
 
+  "permissions": [
+    "nativeMessaging",
+    "storage"
+  ],
+
   "background": {
     "service_worker": "background.js"
   },
