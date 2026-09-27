@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+
+  <title>SteadyUI Calibration</title>
+
+  <link
+    rel="stylesheet"
+    href="calibration.css"
+  />
+</head>
+
+<body>
+
+  <main class="container">
+
+    <header>
+      <h1>SteadyUI Calibration</h1>
+
+      <p>
+        Click each target as naturally as possible.
+        SteadyUI will learn how you move.
+      </p>
+    </header>
+
+
+    <section class="stats">
+
+      <div>
+        <span class="label">Progress</span>
+        <span id="progress">0 / 20</span>
+      </div>
+
+      <div>
+        <span class="label">Successful clicks</span>
+        <span id="hits">0</span>
+      </div>
+
+      <div>
+        <span class="label">Missed clicks</span>
+        <span id="misses">0</span>
+      </div>
+
+    </section>
+
+
+    <div class="controls">
+
+      <button id="startButton">
+        Start Calibration
+      </button>
+
+      <button
+        id="downloadRawButton"
+        disabled
+      >
+        Download Raw Data
+      </button>
+
+      <button
+        id="downloadFeaturesButton"
+        disabled
+      >
+        Download ML Features
+      </button>
+
+    </div>
+
+
+    <section
+      id="testArea"
+      class="test-area"
+    >
+
+      <div
+        id="target"
+        class="target"
+        hidden
+        aria-label="Calibration target"
+      ></div>
+
+      <div
+        id="instructions"
+        class="instructions"
+      >
+        Press Start Calibration
+      </div>
+
+    </section>
+
+
+    <section
+      id="results"
+      class="results"
+      hidden
+    >
+
+      <h2>Your Motor Profile</h2>
+
+      <div class="results-grid">
+
+        <div>
+          <span>Accuracy</span>
+          <strong id="accuracyResult">--</strong>
+        </div>
+
+        <div>
+          <span>Average target time</span>
+          <strong id="timeResult">--</strong>
+        </div>
+
+        <div>
+          <span>Average click offset</span>
+          <strong id="offsetResult">--</strong>
+        </div>
+
+        <div>
+          <span>Cursor samples</span>
+          <strong id="samplesResult">--</strong>
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <script src="calibration.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,163 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  background: #f6f7fb;
+  color: #202124;
+}
+
+
+.container {
+  width: min(1100px, 92%);
+  margin: 40px auto;
+}
+
+
+header {
+  margin-bottom: 24px;
+}
+
+
+h1 {
+  margin-bottom: 6px;
+}
+
+
+header p {
+  color: #666;
+}
+
+
+.stats {
+  display: flex;
+  gap: 40px;
+  margin-bottom: 20px;
+}
+
+
+.stats div {
+  display: flex;
+  flex-direction: column;
+}
+
+
+.label {
+  font-size: 13px;
+  color: #777;
+}
+
+
+.stats span:last-child {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+
+.controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+
+button {
+  padding: 10px 18px;
+  border: none;
+  border-radius: 8px;
+
+  background: #4b50e6;
+  color: white;
+
+  cursor: pointer;
+}
+
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+
+.test-area {
+  position: relative;
+
+  width: 100%;
+  height: 520px;
+
+  border: 2px solid #ddd;
+  border-radius: 16px;
+
+  background: white;
+
+  overflow: hidden;
+}
+
+
+.instructions {
+  position: absolute;
+
+  top: 50%;
+  left: 50%;
+
+  transform: translate(-50%, -50%);
+
+  color: #888;
+}
+
+
+.target {
+  position: absolute;
+
+  border-radius: 50%;
+
+  background: #4b50e6;
+
+  cursor: pointer;
+}
+
+
+.results {
+  margin-top: 30px;
+}
+
+
+.results-grid {
+  display: grid;
+
+  grid-template-columns:
+    repeat(4, 1fr);
+
+  gap: 16px;
+}
+
+
+.results-grid div {
+  padding: 18px;
+
+  background: white;
+
+  border-radius: 12px;
+
+  display: flex;
+  flex-direction: column;
+}
+
+
+.results-grid span {
+  color: #777;
+  font-size: 13px;
+}
+
+
+.results-grid strong {
+  font-size: 24px;
+  margin-top: 4px;
+}
