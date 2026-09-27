@@ -2,7 +2,7 @@ const NATIVE_HOST = "com.zerotremor.host";
 
 chrome.action.onClicked.addListener(() => {
   chrome.tabs.create({
-    url: chrome.runtime.getURL("calibration.html")
+    url: chrome.runtime.getURL("index.html")
   });
 });
 
@@ -53,3 +53,4 @@ chrome.runtime.onMessage.addListener(
     return true;
   }
 );
+

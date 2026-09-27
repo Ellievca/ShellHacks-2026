@@ -202,6 +202,17 @@ impl MacOsPointerSink {
                 (mapping.dragged, mapping.button)
             });
 
+        let event = CGEvent::new_mouse_event(
+            source,
+            CGEventType::MouseMoved,
+            position,
+            CGMouseButton::Left,
+        )
+        .map_err(|_| MacOsSinkError::new("Failed to create synthetic mouse movement event"))?;
+
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, ZEROTREMOR_EVENT_MARKER);
+
+        event.post(CGEventTapLocation::HID);
         self.mouse_event(event_type, position, button)?
             .post(CGEventTapLocation::HID);
 
@@ -276,3 +287,5 @@ impl Drop for MacOsPointerSink {
         let _ = self.set_buttons(0);
     }
 }
+
+pub const ZEROTREMOR_EVENT_MARKER: i64 = 0x5A54_524D;
