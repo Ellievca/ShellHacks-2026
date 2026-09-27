@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 core-engine = { path = "../core-engine" }
+ctrlc = "3.5.2"
 hid-capture = { path = "../hid-capture" }
 os-virtual-input = { path = "../os-virtual-input" }
 serde_json = "1"

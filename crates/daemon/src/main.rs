@@ -15,14 +15,22 @@ use std::fs::File;
 use std::io::BufReader;
 use std::io::Write;
 use std::process::ExitCode;
-use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use core_engine::PassthroughFilter;
 #[cfg(target_os = "linux")]
 use os_virtual_input::LinuxUinputPointerSink;
 #[cfg(target_os = "macos")]
 use os_virtual_input::MacOsPointerSink;
 use os_virtual_input::NoopSink;
+#[cfg(target_os = "macos")]
+use std::io;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -53,6 +61,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 request.port,
             )
         }
+        "run" => run_live(parse_selection(rest)?),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
@@ -374,12 +383,165 @@ fn capture(request: CaptureRequest) -> Result<(), String> {
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<Vec<_>>()
                 .join(" ");
+
             println!("timestamp_us={} report={bytes}", report.timestamp_us);
+
             std::io::stdout()
                 .flush()
                 .map_err(|error| format!("could not write raw report output: {error}"))?;
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_live(selection: DeviceSelection) -> Result<(), String> {
+    let running = Arc::new(AtomicBool::new(true));
+    let enabled = Arc::new(AtomicBool::new(true));
+
+    let opened = open_device(selection.clone()).map_err(|error| error.to_string())?;
+
+    let device = Arc::new(Mutex::new(Some(opened)));
+
+    let running_for_ctrlc = Arc::clone(&running);
+
+    ctrlc::set_handler(move || {
+        running_for_ctrlc.store(false, Ordering::SeqCst);
+    })
+    .map_err(|error| format!("could not install Ctrl+C handler: {error}"))?;
+
+    println!("zeroTremor enabled.");
+    println!("Physical mouse seized.");
+    println!("Commands:");
+    println!("  b + Enter = bypass");
+    println!("  e + Enter = enable");
+    println!("  q + Enter = quit");
+    println!("  Ctrl+C    = quit safely");
+
+    {
+        let running = Arc::clone(&running);
+        let enabled = Arc::clone(&enabled);
+        let device = Arc::clone(&device);
+        let selection = selection.clone();
+
+        thread::spawn(move || {
+            let stdin = io::stdin();
+
+            while running.load(Ordering::SeqCst) {
+                let mut input = String::new();
+
+                if stdin.read_line(&mut input).is_err() {
+                    continue;
+                }
+
+                match input.trim().to_lowercase().as_str() {
+                    "b" => {
+                        enabled.store(false, Ordering::SeqCst);
+
+                        if let Ok(mut guard) = device.lock() {
+                            *guard = None;
+                        }
+
+                        println!("BYPASS: normal physical mouse control restored.");
+                    }
+
+                    "e" => {
+                        if enabled.load(Ordering::SeqCst) {
+                            println!("zeroTremor is already enabled.");
+                            continue;
+                        }
+
+                        match open_device(selection.clone()) {
+                            Ok(opened) => {
+                                if let Ok(mut guard) = device.lock() {
+                                    *guard = Some(opened);
+                                }
+
+                                enabled.store(true, Ordering::SeqCst);
+                                println!("zeroTremor enabled; physical mouse seized.");
+                            }
+
+                            Err(error) => {
+                                eprintln!("could not re-enable zeroTremor: {error}");
+                                eprintln!("remaining in bypass mode");
+                            }
+                        }
+                    }
+
+                    "q" => {
+                        running.store(false, Ordering::SeqCst);
+                    }
+
+                    _ => {
+                        println!("Use b, e, or q.");
+                    }
+                }
+            }
+        });
+    }
+
+    let mut filter = PassthroughFilter;
+    let mut sink = MacOsPointerSink::new().map_err(|error| error.to_string())?;
+
+    let _run_result: Result<(), String> = (|| {
+        while running.load(Ordering::SeqCst) {
+            if !enabled.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+
+            let report = {
+                let guard = device
+                    .lock()
+                    .map_err(|_| "device lock poisoned".to_string())?;
+
+                let Some(opened) = guard.as_ref() else {
+                    continue;
+                };
+
+                opened
+                    .read_raw(50)
+                    .map_err(|error| format!("mouse input failed: {error}"))?
+            };
+
+            let Some(report) = report else {
+                continue;
+            };
+
+            if report.bytes.len() < 3 {
+                continue;
+            }
+
+            let dx = report.bytes[1] as i8 as f32;
+            let dy = report.bytes[2] as i8 as f32;
+
+            let sample = PointerSample {
+                dx,
+                dy,
+                timestamp_us: u64::try_from(report.timestamp_us).unwrap_or(u64::MAX),
+            };
+
+            let filtered = filter.filter(sample);
+
+            sink.emit_relative(filtered.dx, filtered.dy)
+                .map_err(|error| format!("synthetic cursor output failed: {error}"))?;
+        }
+
+        Ok(())
+    })();
+
+    if let Ok(mut guard) = device.lock() {
+        *guard = None;
+    }
+
+    println!("Physical mouse released.");
+    println!("Normal mouse control restored.");
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_live(_selection: DeviceSelection) -> Result<(), String> {
+    Err("live synthetic cursor output is not implemented for this platform yet".into())
 }
 
 fn calibrate(args: &[String]) -> Result<(), String> {
@@ -454,11 +616,7 @@ fn parse_capture_request(args: &[String]) -> Result<CaptureRequest, String> {
         }
         index += 2;
     }
-    let selection = match (path, vid, pid) {
-        (Some(path), None, None) => DeviceSelection::Path(path),
-        (None, Some(vendor_id), Some(product_id)) => DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id }),
-        _ => return Err("capture requires exactly `--vid 1c4f --pid 0048` or `--path <HID path>`; use `zero-tremor devices` first".into()),
-    };
+    let selection = selection_from_parts(path, vid, pid, "capture")?;
     Ok(CaptureRequest {
         selection,
         record_path,
@@ -486,11 +644,7 @@ fn parse_filter_request(args: &[String]) -> Result<FilterRequest, String> {
         }
         index += 2;
     }
-    let selection = match (path, vid, pid) {
-        (Some(path), None, None) => DeviceSelection::Path(path),
-        (None, Some(vendor_id), Some(product_id)) => DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id }),
-        _ => return Err("filter requires exactly one device selector: --vid <hex> --pid <hex> or --path <HID path>".into()),
-    };
+    let selection = selection_from_parts(path, vid, pid, "filter")?;
     Ok(FilterRequest {
         selection,
         profile_path: profile_path.ok_or("filter requires --profile <file>")?,
@@ -559,13 +713,7 @@ fn parse_bridge_request(args: &[String]) -> Result<BridgeRequest, String> {
         }
         index += 2;
     }
-    let selection = match (path, vid, pid) {
-        (Some(path), None, None) => DeviceSelection::Path(path),
-        (None, Some(vendor_id), Some(product_id)) => {
-            DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id })
-        }
-        _ => return Err("bridge requires exactly one device selector: --vid <hex> --pid <hex> or --path <HID path>".into()),
-    };
+    let selection = selection_from_parts(path, vid, pid, "bridge")?;
     Ok(BridgeRequest {
         selection,
         record_path: record_path.ok_or("bridge requires --record <file.jsonl>")?,
@@ -584,6 +732,36 @@ fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     }
 }
 
+fn selection_from_parts(
+    path: Option<String>,
+    vid: Option<u16>,
+    pid: Option<u16>,
+    command: &str,
+) -> Result<DeviceSelection, String> {
+    match (path, vid, pid) {
+        (Some(path), None, None) => Ok(DeviceSelection::Path(path)),
+        (None, Some(vendor_id), Some(product_id)) => {
+            Ok(DeviceSelection::VidPid(DeviceSelector { vendor_id, product_id }))
+        }
+        _ => Err(format!(
+            "{command} requires exactly one device selector: --vid <hex> --pid <hex> or --path <HID path>; use `zero-tremor devices` first"
+        )),
+    }
+}
+
+fn parse_selection(args: &[String]) -> Result<DeviceSelection, String> {
+    let (path, vid, pid) = match args {
+        [flag, value] if flag == "--path" => (Some(value.clone()), None, None),
+        [vid_flag, vid, pid_flag, pid] if vid_flag == "--vid" && pid_flag == "--pid" => (
+            None,
+            Some(parse_hex_id(vid, "VID")?),
+            Some(parse_hex_id(pid, "PID")?),
+        ),
+        _ => (None, None, None),
+    };
+    selection_from_parts(path, vid, pid, "run")
+}
+
 fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
     let value = value
         .strip_prefix("0x")
@@ -594,7 +772,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]
