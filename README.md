@@ -179,9 +179,16 @@ integer-delta smoothing tuning.
 
 ### Telemetry console UI
 
-The React console in `extension/` visualizes every safe-validation stage:
-physical-device identity, HID decoding, active profile, raw and corrected
-deltas, filter decisions, pointer emission, and aggregate travel reduction.
+The React console in `extension/` displays the current device/filter pipeline:
+raw and corrected deltas, filter decision, active profile, travel reduction,
+and the latest reports. It has two data sources:
+
+- **Validation preview:** deterministic sample data; it never opens a HID
+  device or moves the cursor.
+- **Native bridge:** real, timestamped HID reports and filter output during a
+  calibration session.
+
+For local development:
 
 ```bash
 cd extension
@@ -189,82 +196,159 @@ npm ci
 npm run dev
 ```
 
-Use **Run validation preview** to animate a deterministic recording-like feed.
-It does not open a HID device or move a cursor. The UI already accepts daemon
-frames as browser events, which keeps the display layer independent of the
-filter implementation:
+For the browser extension build, run `npm run build` and load `extension/dist`
+as an unpacked extension. Clicking its toolbar icon opens the telemetry
+console. The extension is allowed to contact only the local bridge at
+`http://127.0.0.1:8765`.
 
-```js
-window.dispatchEvent(new CustomEvent('zerotremor:telemetry', {
-  detail: {
-    timestampUs: 1790486547208000,
-    rawDx: -2,
-    rawDy: 1,
-    correctedDx: 0,
-    correctedDy: 0,
-    mode: 'Deadband'
-  }
-}))
+### Native bridge and UI calibration: complete workflow
+
+The browser cannot open a mouse HID device or run shell commands. The native
+bridge performs those privileged tasks; the UI only presents the exercise and
+sends target/path context to the bridge. The bridge binds **only** to loopback,
+never to the LAN or Internet.
+
+1. Complete the Linux HID permissions setup above, if needed, and create a
+   profile with `calibrate`.
+2. Start the bridge in one terminal. This command configures the physical
+   mouse, output file, and optional personalized filter; it does **not** open
+   the mouse yet.
+
+   ```bash
+   mkdir -p recordings
+   cargo run -p daemon -- bridge \
+     --vid 1c4f --pid 0048 \
+     --profile profiles/demo-user.json \
+     --record recordings/target-calibration.jsonl
+   ```
+
+   Use `--path '<HID path>'` to select one exact device instead of VID/PID.
+   Use `--port 8766` only if port `8765` is occupied; the UI currently expects
+   port `8765`.
+3. Open the telemetry UI and choose **Start calibration** or **Begin center
+   check**. The UI sends `POST /v1/session/start` to the bridge.
+4. The bridge opens the selected HID device, creates the JSONL file, starts a
+   daemon-owned monotonic clock, and captures raw reports. If a profile was
+   supplied, it also runs `PersonalizedTremorFilter` and records the corrected
+   delta and mode beside each raw report.
+5. Complete the center target and six varied precision targets. The UI posts
+   pointer-path samples, target geometry, hits, misses, and time-to-target to
+   `POST /v1/event`. The bridge stamps every received UI event with the same
+   session clock used for HID reports.
+6. Completing the final target sends `POST /v1/session/stop`. The capture
+   thread stops and flushes the unified recording. The UI can additionally
+   download its browser-only JSON copy for inspection.
+
+`Ctrl-C` stops the bridge process. If the UI says **Bridge offline**, start the
+bridge command first and confirm no firewall or another process owns port
+`8765`. Permission, missing-device, and profile/device-ID mismatch errors are
+reported by the bridge terminal; fix them before beginning the exercise.
+
+The local endpoints are intentionally small:
+
+| Endpoint | Used by | Purpose |
+| --- | --- | --- |
+| `GET /v1/status` | UI or diagnostics | Reports whether a session is active. |
+| `POST /v1/session/start` | Begin center check | Opens the configured HID device and begins the session. |
+| `GET /v1/telemetry` | UI, polled locally | Returns the latest raw/corrected report and filter mode. |
+| `POST /v1/event` | Calibration UI | Persists browser target/path/click context with a bridge timestamp. |
+| `POST /v1/session/stop` | Final target | Stops capture and flushes the file. |
+
+The bridge is a **capture and telemetry service**, not a live cursor-correction
+service. It never creates a virtual pointer sink, so it cannot add duplicate
+movement while calibration is running.
+
+### Target-centric calibration and coordinates
+
+The calibration contains seven clicks: first the center of the target area,
+then targets with different distances, directions, and sizes. Each pointer
+path sample includes its browser-local `x/y`, target center and size, target
+area dimensions, trial index, current filter telemetry, and whether that
+telemetry came from demo data or the native daemon. Click and miss events
+include elapsed time and click location.
+
+Raw mouse reports are relative: `dx=-2` means “two units left,” not “the
+cursor is at x=-2.” The operating system accumulates those reports. While the
+pointer is over the page, the browser provides the resulting `clientX/clientY`
+position; the UI subtracts the target-area rectangle to get page-local cursor
+coordinates. This lets it know the cursor-to-target relationship without
+pretending raw HID reports contain absolute coordinates.
+
+The center target is a repeatable reference and usability check. It validates
+the browser coordinate frame and measures an approach to a known target, but
+does not calibrate an absolute physical-mouse origin. The bridge's `t_us` is
+the authoritative join key: HID reports and UI events are both measured in
+microseconds from the same bridge session start. Browser `tMs` remains useful
+as UI timing metadata, but should not be used to join streams.
+
+### Unified recording schema
+
+Bridge recordings use JSON Lines. A session header is followed by interleaved
+`report` and `target_calibration` events, ordered by the bridge clock:
+
+```json
+{"type":"session","schema_version":2,"platform":"linux","device":{"vendor_id":7247,"product_id":72,"hid_path":"/dev/hidraw1"},"report_layout":"sigmachip_1c4f_0048_v1","segment":"general"}
+{"type":"report","seq":12,"t_us":184200,"raw_hex":"00 FE 01 00","buttons":0,"dx":-2,"dy":1,"wheel":0,"corrected_dx":0,"corrected_dy":0,"filter_mode":"Deadband"}
+{"type":"target_calibration","t_us":185011,"data":{"kind":"pointer_sample","trial":0,"x":418,"y":211,"targetX":435,"targetY":230,"targetSize":58}}
 ```
 
-A desktop/native bridge can forward each `replay-filter` report into that
-event contract later. Until that bridge is added, the console is explicitly a
-safe preview rather than a claim of live device telemetry.
+`RecordingSession`, raw reports, and profiles are portable across macOS and
+Linux. HID paths and browser pixel coordinates are local metadata; model
+features should normalize coordinates by `areaWidth`/`areaHeight` and use
+device identity only to choose the correct user/device profile.
 
-### Target-centric browser calibration
+### How calibration data feeds a machine-learning model
 
-The telemetry console also includes **Start calibration**. It begins with a
-center-of-window target, followed by targets of different positions and sizes.
-For every trial it records page-local cursor samples, target geometry,
-click/miss outcome, time-to-target, and the current filter telemetry. The
-result can be downloaded as versioned JSON for model training.
+**No ML model is trained or used by the current daemon.** Today,
+`calibrate` derives explainable statistical values (noise percentile, deadband
+cap, smoothing strength, and flick threshold), and
+`PersonalizedTremorFilter` applies deterministic rules. The bridge records the
+data needed for a future model; it does not silently train one.
 
-This is valuable because a target supplies a label that raw motion lacks: the
-user’s intended destination. A model can compare the path, speed, reversals,
-overshoot, and final click offset against that known goal. This makes it
-possible to learn whether a reversal was likely corrective intent or noise,
-without training a black box to blindly alter every delta.
+The recommended first ML task is a small, causal **intent classifier**, not a
+model that directly invents corrected cursor deltas. For a short trailing
+window of reports, compute features such as:
 
-Raw mouse reports cannot provide absolute `x/y`: `dx=-2` means “two units
-left,” not “the pointer is at x=-2.” The OS accumulates those relative deltas
-into a cursor position. While a pointer is over the calibration page, the
-browser exposes that resulting position as `clientX/clientY`; the UI converts
-it to coordinates relative to the target area. So the browser knows the
-cursor-to-target relationship even though the HID report itself has no
-position. It cannot observe pointer movement outside its page.
+- raw and corrected speed, acceleration, direction change, and reversal count;
+- timing between reports and movement magnitude;
+- normalized cursor-to-target distance and direction;
+- target size, trial phase, click/miss, overshoot, and time-to-target;
+- current profile thresholds and recent filter modes.
 
-The center target is therefore a useful reference and usability check—it
-verifies the page coordinate frame and captures a standard approach from the
-center—but it does **not** calibrate an absolute physical-mouse origin. For
-real raw-HID training data, the desktop bridge must forward a timestamped
-daemon frame for each report and align it with the browser sample stream in a
-shared monotonic session clock.
+The known target provides supervision unavailable in a raw capture. For
+example, a tiny reversal while approaching a distant target may be intentional
+correction; repeated small reversals while stationary near a target are more
+likely tremor/noise. Labels can begin with exercise labels (`still`, target
+approach, precision correction, flick) and objective outcomes (hit/miss,
+overshoot). Later, reviewed calibration sessions can add explicit labels for
+ambiguous cases.
 
-### Native calibration bridge
+A practical training pipeline is:
 
-Run the native bridge before starting the UI calibration. It binds only to
-`127.0.0.1`, opens the selected HID device only after **Begin center check**,
-and writes one JSONL stream containing the session header, raw reports,
-profile-corrected deltas/modes, and browser target/path events. The UI also
-polls its local telemetry endpoint, so its dashboard changes from demo data to
-the real filter output during calibration.
-
-```bash
-mkdir -p recordings
-cargo run -p daemon -- bridge \
-  --vid 1c4f --pid 0048 \
-  --profile profiles/demo-user.json \
-  --record recordings/target-calibration.jsonl
+```text
+unified JSONL sessions
+  → validate schema/device/profile and normalize coordinates
+  → build causal windows and feature vectors
+  → assign task/outcome labels
+  → split train/validation by whole session, not random reports
+  → train a small logistic-regression model or shallow tree
+  → evaluate hit rate, overshoot, time-to-target, and false suppression
+  → export a versioned per-user/device model with its feature schema
 ```
 
-Leave that terminal running, open the telemetry UI, then select **Start
-calibration** or **Begin center check**. The bridge automatically starts HID
-capture; completing the seventh target stops it and flushes the recording.
-`Ctrl-C` stops the bridge itself. Use `--path <HID path>` for an exact device
-or `--port <port>` if `8765` is already occupied.
+At runtime the model would output confidence for classes such as `noise`,
+`slow_intentional`, `precision_correction`, and `flick`. The existing safe
+filter remains the policy layer: low noise confidence means pass through;
+high noise confidence can increase smoothing/deadband; high flick confidence
+bypasses correction. Keep hard safety limits—bounded output, causal windows,
+profile/device match, and an immediate bypass toggle—outside the ML model.
 
-The browser extension manifest permits only this loopback address. The bridge
-never binds to the network, invokes Cargo, or sends recordings elsewhere.
+Train and validate per user and per mouse model first. Do not mix a user's
+sessions between training and validation: nearby reports are strongly
+correlated and would make accuracy look falsely high. A model is acceptable
+only if it preserves or improves target hit rate and time-to-target while
+reducing unwanted movement on held-out sessions. Keep recordings local by
+default and obtain explicit consent before any cross-user training.
 
 ### Replay a recording
 
