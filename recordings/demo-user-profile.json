@@ -2,11 +2,11 @@
   "schema_version": 1,
   "device_vendor_id": 7247,
   "device_product_id": 72,
-  "still_noise_p95": 2.236068,
+  "still_noise_p95": 3.6055512,
   "deadband_threshold": 0.75,
-  "slow_speed_p50": 50.542065,
-  "flick_speed_p10": 62.53126,
+  "slow_speed_p50": 125.65972,
+  "flick_speed_p10": 123.747055,
   "reversal_window_ms": 45,
   "smoothing_strength": 0.35,
-  "flick_speed_threshold": 75.813095
+  "flick_speed_threshold": 188.48958
 }

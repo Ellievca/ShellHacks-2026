@@ -188,9 +188,6 @@ pub fn derive_calibration_profile(
     let (still_session, still_reports) = still;
     let (slow_session, slow_reports) = slow;
     let (flick_session, flick_reports) = flick;
-    if still_reports.is_empty() {
-        return Err(CalibrationError::EmptySegment("still"));
-    }
     if slow_reports.is_empty() {
         return Err(CalibrationError::EmptySegment("slow intentional movement"));
     }
@@ -204,6 +201,8 @@ pub fn derive_calibration_profile(
     if !same_device(slow_session) || !same_device(flick_session) {
         return Err(CalibrationError::DeviceMismatch);
     }
+    // A truly untouched mouse often emits no reports at all. That is valid
+    // evidence of zero observed still-hold noise, not a failed calibration.
     let still_noise_p95 = percentile(magnitudes(still_reports), 0.95);
     let slow_step_p25 = percentile(magnitudes(slow_reports), 0.25);
     let slow_speed_p50 = percentile(speeds(slow_reports), 0.50);

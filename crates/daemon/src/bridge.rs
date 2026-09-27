@@ -1,12 +1,13 @@
 use core_engine::{
-    write_jsonl_event, CalibrationProfile, CalibrationSegment, FilterMode,
-    PersonalizedTremorFilter, RecordedReport, RecordingDevice, RecordingEvent, RecordingSession,
-    TargetCalibrationEvent,
+    derive_calibration_profile, read_jsonl_reports, write_jsonl_event, CalibrationProfile,
+    CalibrationSegment, FilterMode, PersonalizedTremorFilter, RecordedReport, RecordingDevice,
+    RecordingEvent, RecordingSession, TargetCalibrationEvent,
 };
 use hid_capture::{open_device, DemoMouseDecoder, DeviceSelection, ReportDecoder};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,7 +34,7 @@ pub fn serve(
     let state = Arc::new(BridgeState {
         selection,
         record_path,
-        profile,
+        profile: Mutex::new(profile),
         active: AtomicBool::new(false),
         sequence: AtomicU64::new(0),
         started: Mutex::new(None),
@@ -61,7 +62,7 @@ pub fn serve(
 struct BridgeState {
     selection: DeviceSelection,
     record_path: String,
-    profile: Option<CalibrationProfile>,
+    profile: Mutex<Option<CalibrationProfile>>,
     active: AtomicBool,
     sequence: AtomicU64,
     started: Mutex<Option<Instant>>,
@@ -76,6 +77,7 @@ fn handle_request(mut stream: TcpStream, state: Arc<BridgeState>) -> Result<(), 
         ("GET", "/v1/status") => Ok(serde_json::json!({
             "ok": true,
             "active": state.active.load(Ordering::Relaxed),
+            "reports": state.sequence.load(Ordering::Relaxed),
             "record_path": state.record_path,
         })),
         ("GET", "/v1/telemetry") => Ok(state
@@ -85,7 +87,15 @@ fn handle_request(mut stream: TcpStream, state: Arc<BridgeState>) -> Result<(), 
             .clone()
             .unwrap_or_else(|| serde_json::json!({ "active": false }))),
         ("POST", "/v1/session/start") => {
-            start_session(&state).map(|_| serde_json::json!({ "ok": true }))
+            let segment = if body.is_empty() {
+                CalibrationSegment::General
+            } else {
+                let request: serde_json::Value = serde_json::from_slice(&body)
+                    .map_err(|error| format!("invalid session-start JSON: {error}"))?;
+                parse_stage_segment(request.get("segment").and_then(serde_json::Value::as_str))?
+            };
+            start_session(&state, segment)
+                .map(|record_path| serde_json::json!({ "ok": true, "record_path": record_path }))
         }
         ("POST", "/v1/session/stop") => {
             state.active.store(false, Ordering::SeqCst);
@@ -96,6 +106,8 @@ fn handle_request(mut stream: TcpStream, state: Arc<BridgeState>) -> Result<(), 
                 .map_err(|error| format!("invalid bridge event JSON: {error}"))?;
             write_target_event(&state, data).map(|_| serde_json::json!({ "ok": true }))
         }
+        ("POST", "/v1/calibration/derive") => derive_ui_profile(&state)
+            .map(|profile_path| serde_json::json!({ "ok": true, "profile_path": profile_path })),
         _ => Err(format!("unknown bridge endpoint {method} {path}")),
     };
     match response {
@@ -108,7 +120,17 @@ fn handle_request(mut stream: TcpStream, state: Arc<BridgeState>) -> Result<(), 
     }
 }
 
-fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
+fn parse_stage_segment(value: Option<&str>) -> Result<CalibrationSegment, String> {
+    match value.unwrap_or("general") {
+        "still" => Ok(CalibrationSegment::Still),
+        "slow" => Ok(CalibrationSegment::SlowIntentional),
+        "flick" => Ok(CalibrationSegment::Flick),
+        "general" => Ok(CalibrationSegment::General),
+        _ => Err("invalid calibration stage; use still, slow, flick, or general".into()),
+    }
+}
+
+fn start_session(state: &Arc<BridgeState>, segment: CalibrationSegment) -> Result<String, String> {
     if state.active.swap(true, Ordering::SeqCst) {
         return Err("a calibration session is already active".into());
     }
@@ -119,7 +141,12 @@ fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
             return Err(error.to_string());
         }
     };
-    if let Some(profile) = &state.profile {
+    if let Some(profile) = state
+        .profile
+        .lock()
+        .map_err(|_| "bridge profile lock poisoned")?
+        .as_ref()
+    {
         if profile.device_vendor_id != opened.info.vendor_id
             || profile.device_product_id != opened.info.product_id
         {
@@ -133,13 +160,20 @@ fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
             ));
         }
     }
-    let file = match File::create(&state.record_path) {
+    let record_path = segment_path(&state.record_path, segment);
+    if let Some(parent) = record_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            state.active.store(false, Ordering::SeqCst);
+            format!("could not create recording directory {parent:?}: {error}")
+        })?;
+    }
+    let file = match File::create(&record_path) {
         Ok(file) => file,
         Err(error) => {
             state.active.store(false, Ordering::SeqCst);
             return Err(format!(
                 "could not create unified recording {:?}: {error}",
-                state.record_path
+                record_path
             ));
         }
     };
@@ -154,7 +188,7 @@ fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
             hid_path: Some(opened.info.path.clone()),
         },
         report_layout: "sigmachip_1c4f_0048_v1".into(),
-        segment: CalibrationSegment::General,
+        segment,
     };
     let mut writer = BufWriter::new(file);
     write_jsonl_event(&mut writer, &RecordingEvent::Session(session))
@@ -170,12 +204,17 @@ fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
     state.sequence.store(0, Ordering::Relaxed);
     let capture_state = Arc::clone(state);
     thread::spawn(move || capture_loop(opened, capture_state));
-    Ok(())
+    Ok(record_path.to_string_lossy().into_owned())
 }
 
 fn capture_loop(opened: hid_capture::OpenedDevice, state: Arc<BridgeState>) {
     let decoder = DemoMouseDecoder;
-    let mut filter = state.profile.clone().map(PersonalizedTremorFilter::new);
+    let mut filter = state
+        .profile
+        .lock()
+        .ok()
+        .and_then(|profile| profile.clone())
+        .map(PersonalizedTremorFilter::new);
     while state.active.load(Ordering::SeqCst) {
         let report = match opened.read_raw(250) {
             Ok(Some(report)) => report,
@@ -237,6 +276,75 @@ fn capture_loop(opened: hid_capture::OpenedDevice, state: Arc<BridgeState>) {
         }
         *writer = None;
     }
+}
+
+fn segment_path(base: &str, segment: CalibrationSegment) -> PathBuf {
+    if segment == CalibrationSegment::General {
+        return PathBuf::from(base);
+    }
+    let path = Path::new(base);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("calibration");
+    parent.join(format!("{stem}-{}.jsonl", segment_name(segment)))
+}
+
+fn profile_path(base: &str) -> PathBuf {
+    let path = Path::new(base);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("calibration");
+    parent.join(format!("{stem}-profile.json"))
+}
+
+fn segment_name(segment: CalibrationSegment) -> &'static str {
+    match segment {
+        CalibrationSegment::Still => "still",
+        CalibrationSegment::SlowIntentional => "slow",
+        CalibrationSegment::Flick => "flick",
+        CalibrationSegment::General => "general",
+    }
+}
+
+fn derive_ui_profile(state: &BridgeState) -> Result<String, String> {
+    if state.active.load(Ordering::SeqCst) {
+        return Err("stop the active calibration stage before deriving a profile".into());
+    }
+    let load = |segment| {
+        let path = segment_path(&state.record_path, segment);
+        let file = File::open(&path)
+            .map_err(|error| format!("could not open UI calibration {path:?}: {error}"))?;
+        read_jsonl_reports(BufReader::new(file)).map_err(|error| error.to_string())
+    };
+    let still = load(CalibrationSegment::Still)?;
+    let slow = load(CalibrationSegment::SlowIntentional)?;
+    let flick = load(CalibrationSegment::Flick)?;
+    let profile = derive_calibration_profile(
+        (&still.0, &still.1),
+        (&slow.0, &slow.1),
+        (&flick.0, &flick.1),
+    )
+    .map_err(|error| error.to_string())?;
+    let path = profile_path(&state.record_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create profile directory {parent:?}: {error}"))?;
+    }
+    serde_json::to_writer_pretty(
+        File::create(&path)
+            .map_err(|error| format!("could not create profile {path:?}: {error}"))?,
+        &profile,
+    )
+    .map_err(|error| format!("could not write profile {path:?}: {error}"))?;
+    *state
+        .profile
+        .lock()
+        .map_err(|_| "bridge profile lock poisoned")? = Some(profile);
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn write_target_event(state: &BridgeState, data: serde_json::Value) -> Result<(), String> {
