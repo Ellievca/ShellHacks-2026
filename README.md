@@ -314,6 +314,17 @@ never to the LAN or Internet.
    recordings/demo-user-profile.json
    ```
 
+   **Overwrite rule:** these are fresh, per-session files. Starting another
+   full calibration with the same `--record recordings/demo-user.jsonl` base
+   overwrites all five files above; nothing is appended across sessions. The
+   target file is appended only while its own seven-circle stage is active.
+   Preserve multiple sessions for ML by changing the base name every time:
+
+   ```bash
+   --record recordings/demo-user-session-01.jsonl
+   --record recordings/demo-user-session-02.jsonl
+   ```
+
 5. The target exercise creates `recordings/demo-user.jsonl`. The UI posts
    pointer-path samples, target geometry, hits, misses, and time-to-target to
    `POST /v1/event`. The bridge stamps every received UI event with the same
@@ -412,11 +423,11 @@ device identity only to choose the correct user/device profile.
 
 ### How calibration data feeds a machine-learning model
 
-**No ML model is trained or used by the current daemon.** Today,
 `calibrate` derives explainable statistical values (noise percentile, deadband
 cap, smoothing strength, and flick threshold), and
 `PersonalizedTremorFilter` applies deterministic rules. The bridge records the
-data needed for a future model; it does not silently train one.
+data for a local ML prototype; it does not silently train a model after every
+calibration.
 
 The recommended first ML task is a small, causal **intent classifier**, not a
 model that directly invents corrected cursor deltas. For a short trailing
@@ -449,11 +460,29 @@ unified JSONL sessions
   → export a versioned per-user/device model with its feature schema
 ```
 
-### Practical ML-training handoff
+### Train the local intent-model baseline
 
-The schema is ready for training, but this repository does not yet include a
-trainer or ship a model. After collecting several complete UI calibrations for
-the same user and mouse, take these steps:
+The `train` command produces a versioned per-user/per-device nearest-centroid
+intent classifier. It learns four conservative classes from one complete UI
+bundle: `noise`, `slow_intentional`, `flick`, and (when supplied) target-stage
+`precision_correction`.
+
+```bash
+cargo run -p daemon -- train \
+  --still recordings/demo-user-session-01-still.jsonl \
+  --slow recordings/demo-user-session-01-slow.jsonl \
+  --flick recordings/demo-user-session-01-flick.jsonl \
+  --target recordings/demo-user-session-01.jsonl \
+  --model models/demo-user-session-01.json
+```
+
+The command creates `models/` when needed and writes feature names, feature
+normalization, class centroids, device IDs, and example counts to the model
+JSON. It is a transparent first ML baseline—not a claim that one session is a
+safe production model, and it is not connected to live cursor correction.
+
+After collecting several complete UI calibrations for the same user and mouse,
+take these steps:
 
 1. Keep each calibration bundle together: its `-still.jsonl`, `-slow.jsonl`,
    `-flick.jsonl`, target-exercise `.jsonl`, and generated `-profile.json`.
@@ -465,9 +494,10 @@ the same user and mouse, take these steps:
    hit/miss, overshoot, and time-to-target.
 4. Split by complete session, reserving newer sessions for validation. Never
    randomly split adjacent reports from one session across train and test.
-5. Train a small per-user/per-device intent classifier first (logistic
-   regression or a shallow tree is appropriate), then compare it with the
-   deterministic profile on the held-out sessions.
+5. Train one model from the training sessions, then compare it with the
+   deterministic profile on held-out sessions. The current CLI trains one
+   bundle at a time; multi-session aggregation and automatic held-out metrics
+   are the next trainer extension.
 6. Accept a model only when it maintains or improves hit rate and
    time-to-target while reducing unwanted low-amplitude movement. Export the
    model with its feature-schema version, profile/device IDs, metrics, and a

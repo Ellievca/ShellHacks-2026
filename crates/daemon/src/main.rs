@@ -3,8 +3,9 @@
 mod bridge;
 
 use core_engine::{
-    derive_calibration_profile, read_jsonl_reports, CalibrationProfile, CalibrationSegment,
-    FilterMode, PersonalizedTremorFilter, PointerFilter, PointerSample, PointerSink,
+    derive_calibration_profile, read_jsonl_reports, train_intent_model, CalibrationProfile,
+    CalibrationSegment, FilterMode, IntentModel, PersonalizedTremorFilter, PointerFilter,
+    PointerSample, PointerSink,
 };
 use hid_capture::{
     list_devices, open_device, DemoMouseDecoder, DeviceSelection, DeviceSelector,
@@ -50,6 +51,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         "devices" | "list-devices" if rest.is_empty() => print_devices(),
         "capture" | "inspect-device" => capture(parse_capture_request(rest)?),
         "calibrate" => calibrate(rest),
+        "train" => train_model(parse_train_request(rest)?),
         "filter" => filter_live(parse_filter_request(rest)?),
         "replay-filter" => replay_filtered(parse_replay_request(rest)?),
         "bridge" => {
@@ -81,6 +83,57 @@ struct BridgeRequest {
     record_path: String,
     profile_path: Option<String>,
     port: u16,
+}
+
+struct TrainRequest {
+    still_path: String,
+    slow_path: String,
+    flick_path: String,
+    target_path: Option<String>,
+    model_path: String,
+}
+
+fn train_model(request: TrainRequest) -> Result<(), String> {
+    let load = |path: &str| {
+        let file = File::open(path)
+            .map_err(|error| format!("could not open training recording {path:?}: {error}"))?;
+        read_jsonl_reports(BufReader::new(file))
+            .map_err(|error| format!("could not read training recording {path:?}: {error}"))
+    };
+    let still = load(&request.still_path)?;
+    let slow = load(&request.slow_path)?;
+    let flick = load(&request.flick_path)?;
+    let target = match &request.target_path {
+        Some(path) => Some(load(path)?),
+        None => None,
+    };
+    let model: IntentModel = train_intent_model(
+        (&still.0, &still.1),
+        (&slow.0, &slow.1),
+        (&flick.0, &flick.1),
+        target.as_ref().map(|value| (&value.0, value.1.as_slice())),
+    )
+    .map_err(|error| format!("could not train intent model: {error}"))?;
+    if let Some(parent) = std::path::Path::new(&request.model_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create model directory {parent:?}: {error}"))?;
+    }
+    serde_json::to_writer_pretty(
+        File::create(&request.model_path)
+            .map_err(|error| format!("could not create model {:?}: {error}", request.model_path))?,
+        &model,
+    )
+    .map_err(|error| format!("could not write model {:?}: {error}", request.model_path))?;
+    println!(
+        "trained local intent model for {:04X}:{:04X}",
+        model.device_vendor_id, model.device_product_id
+    );
+    for class in &model.classes {
+        println!("  {:?}: {} examples", class.class, class.examples);
+    }
+    println!("saved model: {}", request.model_path);
+    println!("This model is not connected to live cursor correction; validate it on held-out sessions first.");
+    Ok(())
 }
 
 /// Replays only the filter output from a saved recording. This deliberately
@@ -722,6 +775,37 @@ fn parse_bridge_request(args: &[String]) -> Result<BridgeRequest, String> {
     })
 }
 
+fn parse_train_request(args: &[String]) -> Result<TrainRequest, String> {
+    let mut still_path = None;
+    let mut slow_path = None;
+    let mut flick_path = None;
+    let mut target_path = None;
+    let mut model_path = None;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("{flag} requires a path"))?;
+        match flag.as_str() {
+            "--still" => still_path = Some(value.clone()),
+            "--slow" => slow_path = Some(value.clone()),
+            "--flick" => flick_path = Some(value.clone()),
+            "--target" => target_path = Some(value.clone()),
+            "--model" => model_path = Some(value.clone()),
+            _ => return Err(format!("unknown train option {flag:?}")),
+        }
+        index += 2;
+    }
+    Ok(TrainRequest {
+        still_path: still_path.ok_or("train requires --still <file.jsonl>")?,
+        slow_path: slow_path.ok_or("train requires --slow <file.jsonl>")?,
+        flick_path: flick_path.ok_or("train requires --flick <file.jsonl>")?,
+        target_path,
+        model_path: model_path.ok_or("train requires --model <file.json>")?,
+    })
+}
+
 fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     match value {
         "still" => Ok(CalibrationSegment::Still),
@@ -772,7 +856,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor train --still <file> --slow <file> --flick <file> [--target <file>] --model <file.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]
