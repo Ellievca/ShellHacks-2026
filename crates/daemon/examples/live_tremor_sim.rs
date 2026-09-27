@@ -42,12 +42,8 @@ mod live {
         let args = parse_args();
         let mut writer = create_csv(&args.output_path)?;
 
-        let mut simulator = TremorSimulator::new(TremorConfig {
-            frequency_hz: args.frequency_hz,
-            amplitude_x: args.amplitude,
-            amplitude_y: args.amplitude * 0.75,
-            ..TremorConfig::default()
-        });
+        let mut simulator =
+            TremorSimulator::new(TremorConfig::new(args.frequency_hz, args.amplitude));
 
         let opened = open_demo_mouse(&args)?;
         let running = stop_on_ctrl_c()?;

@@ -1,14 +1,15 @@
 //! zeroTremor command-line entry point.
 
 mod bridge;
+mod simulate;
 
 use core_engine::{
     derive_calibration_profile, read_jsonl_reports, CalibrationProfile, CalibrationSegment,
-    FilterMode, PersonalizedTremorFilter, PointerFilter, PointerSample, PointerSink,
+    FilterMode, PersonalizedTremorFilter, PointerFilter, PointerSample, PointerSink, TremorConfig,
 };
 use hid_capture::{
-    list_devices, open_device, DemoMouseDecoder, DeviceSelection, DeviceSelector,
-    JsonlCaptureRecorder, ReportDecoder,
+    hex_bytes, list_devices, open_device, DemoMouseDecoder, DeviceSelection, DeviceSelector,
+    HidDeviceInfo, JsonlCaptureRecorder, RawInputReport, ReportDecoder,
 };
 use std::env;
 use std::fs::File;
@@ -350,26 +351,22 @@ struct CaptureRequest {
     selection: DeviceSelection,
     record_path: Option<String>,
     segment: CalibrationSegment,
+    tremor: Option<TremorConfig>,
 }
 
 fn capture(request: CaptureRequest) -> Result<(), String> {
     let opened = open_device(request.selection).map_err(|error| error.to_string())?;
-    let mut recorder = match request.record_path {
-        Some(path) => Some(
-            JsonlCaptureRecorder::new(
-                File::create(&path)
-                    .map_err(|error| format!("could not create recording {path:?}: {error}"))?,
-                &opened.info,
-                request.segment,
-            )
-            .map_err(|error| error.to_string())?,
-        ),
-        None => None,
-    };
+    let mut recorder = request
+        .record_path
+        .map(|path| open_recorder(&path, &opened.info, request.segment, request.tremor))
+        .transpose()?;
     println!(
         "Capturing raw reports from {:04X}:{:04X} {} (Ctrl-C to stop)",
         opened.info.vendor_id, opened.info.product_id, opened.info.path
     );
+    if let Some(config) = request.tremor {
+        return simulate::capture_with_tremor(&opened, recorder.as_mut(), config);
+    }
     loop {
         if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
             if let Some(recorder) = recorder.as_mut() {
@@ -377,20 +374,36 @@ fn capture(request: CaptureRequest) -> Result<(), String> {
                     .record(&report)
                     .map_err(|error| error.to_string())?;
             }
-            let bytes = report
-                .bytes
-                .iter()
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            println!("timestamp_us={} report={bytes}", report.timestamp_us);
-
-            std::io::stdout()
-                .flush()
-                .map_err(|error| format!("could not write raw report output: {error}"))?;
+            print_report(&report)?;
         }
     }
+}
+
+fn open_recorder(
+    path: &str,
+    device: &HidDeviceInfo,
+    segment: CalibrationSegment,
+    tremor: Option<TremorConfig>,
+) -> Result<JsonlCaptureRecorder<File>, String> {
+    let file = File::create(path)
+        .map_err(|error| format!("could not create recording {path:?}: {error}"))?;
+    match tremor {
+        Some(tremor) => JsonlCaptureRecorder::new_synthetic(file, device, segment, tremor),
+        None => JsonlCaptureRecorder::new(file, device, segment),
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn print_report(report: &RawInputReport) -> Result<(), String> {
+    println!(
+        "timestamp_us={} report={}",
+        report.timestamp_us,
+        hex_bytes(&report.bytes)
+    );
+
+    std::io::stdout()
+        .flush()
+        .map_err(|error| format!("could not write raw report output: {error}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -600,6 +613,8 @@ fn parse_capture_request(args: &[String]) -> Result<CaptureRequest, String> {
     let mut pid = None;
     let mut record_path = None;
     let mut segment = CalibrationSegment::General;
+    let mut tremor_hz = None;
+    let mut tremor_amplitude = None;
     let mut index = 0;
     while index < args.len() {
         let (flag, value) = args
@@ -612,15 +627,17 @@ fn parse_capture_request(args: &[String]) -> Result<CaptureRequest, String> {
             "--pid" => pid = Some(parse_hex_id(value, "PID")?),
             "--record" => record_path = Some(value.clone()),
             "--segment" => segment = parse_segment(value)?,
+            "--tremor-hz" => tremor_hz = Some(parse_positive(value, flag)?),
+            "--tremor-amplitude" => tremor_amplitude = Some(parse_positive(value, flag)?),
             _ => return Err(format!("unknown capture option {flag:?}")),
         }
         index += 2;
     }
-    let selection = selection_from_parts(path, vid, pid, "capture")?;
     Ok(CaptureRequest {
-        selection,
+        selection: selection_from_parts(path, vid, pid, "capture")?,
         record_path,
         segment,
+        tremor: tremor_from_parts(tremor_hz, tremor_amplitude)?,
     })
 }
 
@@ -722,6 +739,25 @@ fn parse_bridge_request(args: &[String]) -> Result<BridgeRequest, String> {
     })
 }
 
+fn tremor_from_parts(
+    hz: Option<f32>,
+    amplitude: Option<f32>,
+) -> Result<Option<TremorConfig>, String> {
+    match (hz, amplitude) {
+        (None, None) => Ok(None),
+        (Some(hz), Some(amplitude)) => Ok(Some(TremorConfig::new(hz, amplitude))),
+        _ => Err("--tremor-hz and --tremor-amplitude must be used together".into()),
+    }
+}
+
+fn parse_positive(value: &str, flag: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|number| number.is_finite() && *number > 0.0)
+        .ok_or_else(|| format!("{flag} must be a positive number"))
+}
+
 fn parse_segment(value: &str) -> Result<CalibrationSegment, String> {
     match value {
         "still" => Ok(CalibrationSegment::Still),
@@ -772,7 +808,7 @@ fn parse_hex_id(value: &str, label: &str) -> Result<u16, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
+    "Usage:\n  zero-tremor devices\n  zero-tremor capture (--vid <hex> --pid <hex> | --path <HID path>) [--record <file.jsonl> --segment <still|slow|flick|general>] [--tremor-hz <hz> --tremor-amplitude <px>]\n  zero-tremor calibrate --still <file> --slow <file> --flick <file> --profile <profile.json>\n  zero-tremor filter (--vid <hex> --pid <hex> | --path <HID path>) --profile <profile.json>\n  zero-tremor replay-filter --record <file.jsonl> --profile <profile.json> [--dry-run]\n  zero-tremor bridge (--vid <hex> --pid <hex> | --path <HID path>) --record <file.jsonl> [--profile <profile.json>] [--port 8765]\n  zero-tremor run (--vid <hex> --pid <hex> | --path <HID path>)\n\nAliases: list-devices, inspect-device".into()
 }
 
 #[cfg(test)]

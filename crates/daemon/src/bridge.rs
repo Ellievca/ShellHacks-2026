@@ -3,7 +3,7 @@ use core_engine::{
     PersonalizedTremorFilter, RecordedReport, RecordingDevice, RecordingEvent, RecordingSession,
     TargetCalibrationEvent,
 };
-use hid_capture::{open_device, DemoMouseDecoder, DeviceSelection, ReportDecoder};
+use hid_capture::{hex_bytes, open_device, DemoMouseDecoder, DeviceSelection, ReportDecoder};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -155,6 +155,7 @@ fn start_session(state: &Arc<BridgeState>) -> Result<(), String> {
         },
         report_layout: "sigmachip_1c4f_0048_v1".into(),
         segment: CalibrationSegment::General,
+        synthetic_tremor: None,
     };
     let mut writer = BufWriter::new(file);
     write_jsonl_event(&mut writer, &RecordingEvent::Session(session))
@@ -200,12 +201,7 @@ fn capture_loop(opened: hid_capture::OpenedDevice, state: Arc<BridgeState>) {
         let event = RecordedReport {
             seq: state.sequence.fetch_add(1, Ordering::Relaxed) + 1,
             t_us,
-            raw_hex: report
-                .bytes
-                .iter()
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(" "),
+            raw_hex: hex_bytes(&report.bytes),
             buttons: report.bytes.first().copied().unwrap_or(0),
             dx: raw.dx as i8,
             dy: raw.dy as i8,
@@ -213,6 +209,8 @@ fn capture_loop(opened: hid_capture::OpenedDevice, state: Arc<BridgeState>) {
             corrected_dx: Some(corrected.dx as i8),
             corrected_dy: Some(corrected.dy as i8),
             filter_mode: Some(format!("{mode:?}")),
+            clean_dx: None,
+            clean_dy: None,
         };
         if let Ok(mut telemetry) = state.telemetry.lock() {
             *telemetry = Some(serde_json::json!({

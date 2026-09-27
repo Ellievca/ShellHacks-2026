@@ -39,13 +39,16 @@ pub enum CalibrationSegment {
 }
 
 /// First line of every JSONL capture.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecordingSession {
     pub schema_version: u32,
     pub platform: String,
     pub device: RecordingDevice,
     pub report_layout: String,
     pub segment: CalibrationSegment,
+    /// Present only when capture added synthetic tremor to the recorded dx/dy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetic_tremor: Option<TremorConfig>,
 }
 
 /// A raw report plus the normalized fields consumed by replay and filtering.
@@ -67,6 +70,12 @@ pub struct RecordedReport {
     pub corrected_dy: Option<i8>,
     #[serde(default)]
     pub filter_mode: Option<String>,
+    /// Present only in synthetic-tremor captures: the intentional movement
+    /// before tremor was added, kept as ground truth for evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_dx: Option<i8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_dy: Option<i8>,
 }
 
 /// A browser target/path event stamped by the native bridge's session clock.
@@ -167,6 +176,7 @@ fn default_deadband_threshold() -> f32 {
 pub enum CalibrationError {
     EmptySegment(&'static str),
     DeviceMismatch,
+    SyntheticTremorMismatch,
 }
 
 impl fmt::Display for CalibrationError {
@@ -176,6 +186,10 @@ impl fmt::Display for CalibrationError {
             Self::DeviceMismatch => write!(
                 f,
                 "calibration recordings belong to different device models"
+            ),
+            Self::SyntheticTremorMismatch => write!(
+                f,
+                "calibration recordings were captured with different synthetic tremor settings"
             ),
         }
     }
@@ -207,6 +221,11 @@ pub fn derive_calibration_profile(
     };
     if !same_device(slow_session) || !same_device(flick_session) {
         return Err(CalibrationError::DeviceMismatch);
+    }
+    if slow_session.synthetic_tremor != still_session.synthetic_tremor
+        || flick_session.synthetic_tremor != still_session.synthetic_tremor
+    {
+        return Err(CalibrationError::SyntheticTremorMismatch);
     }
     let still_noise_p95 = percentile(magnitudes(still_reports), 0.95);
     let slow_step_p25 = percentile(magnitudes(slow_reports), 0.25);
@@ -275,6 +294,7 @@ mod tests {
             },
             report_layout: "sigmachip_1c4f_0048_v1".into(),
             segment,
+            synthetic_tremor: None,
         }
     }
 
@@ -290,7 +310,35 @@ mod tests {
             corrected_dx: None,
             corrected_dy: None,
             filter_mode: None,
+            clean_dx: None,
+            clean_dy: None,
         }
+    }
+
+    #[test]
+    fn plain_reports_omit_ground_truth_and_old_logs_still_parse() {
+        let json = serde_json::to_string(&report(1, 1, 1)).unwrap();
+        assert!(!json.contains("clean_d"));
+
+        let old =
+            r#"{"seq":1,"t_us":1,"raw_hex":"00 01 01 00","buttons":0,"dx":1,"dy":1,"wheel":0}"#;
+        let parsed: RecordedReport = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.clean_dx, None);
+    }
+
+    #[test]
+    fn calibration_rejects_mixed_synthetic_tremor_settings() {
+        let reports = [report(1, 1, 0), report(2, 1, 0)];
+        let mut tremor_still = session(CalibrationSegment::Still);
+        tremor_still.synthetic_tremor = Some(TremorConfig::new(5.0, 3.0));
+
+        let result = derive_calibration_profile(
+            (&tremor_still, &reports),
+            (&session(CalibrationSegment::SlowIntentional), &reports),
+            (&session(CalibrationSegment::Flick), &reports),
+        );
+
+        assert_eq!(result, Err(CalibrationError::SyntheticTremorMismatch));
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use std::f32::consts::TAU;
 
+use serde::{Deserialize, Serialize};
+
 use crate::PointerSample;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct TremorConfig {
     /// Main synthetic oscillation frequency.
     pub frequency_hz: f32,
@@ -17,6 +19,19 @@ pub struct TremorConfig {
     /// Slowly varies amplitude over time.
     pub amplitude_mod_hz: f32,
     pub amplitude_mod_depth: f32,
+}
+
+impl TremorConfig {
+    /// Default tremor shape at the given frequency and X amplitude; Y moves at
+    /// 75% of X so the two axes don't shake identically.
+    pub fn new(frequency_hz: f32, amplitude: f32) -> Self {
+        Self {
+            frequency_hz,
+            amplitude_x: amplitude,
+            amplitude_y: amplitude * 0.75,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for TremorConfig {

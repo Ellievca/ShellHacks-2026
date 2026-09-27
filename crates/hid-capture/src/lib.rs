@@ -5,12 +5,26 @@
 
 use core_engine::{
     write_jsonl_event, CalibrationSegment, PointerSample, RecordedReport, RecordingDevice,
-    RecordingEvent, RecordingSession,
+    RecordingEvent, RecordingSession, TremorConfig,
 };
 use hidapi::{HidApi, HidDevice};
 use std::fmt;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
+
+/// Wall-clock microseconds since the Unix epoch, as stamped on raw reports.
+pub fn now_us() -> Result<u128, SystemTimeError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())
+}
+
+/// Formats report bytes as space-separated uppercase hex, e.g. `00 FF 01 00`.
+pub fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Metadata used to select a physical HID device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,10 +166,7 @@ impl OpenedDevice {
                 "report exceeds the capture buffer",
             ));
         }
-        let timestamp_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(CaptureError::Clock)?
-            .as_micros();
+        let timestamp_us = now_us().map_err(CaptureError::Clock)?;
         Ok(Some(RawInputReport {
             timestamp_us,
             bytes: buffer[..length].to_vec(),
@@ -254,14 +265,32 @@ pub struct JsonlCaptureRecorder<W: Write> {
 
 impl<W: Write> JsonlCaptureRecorder<W> {
     pub fn new(
-        mut writer: W,
+        writer: W,
         device: &HidDeviceInfo,
         segment: CalibrationSegment,
     ) -> Result<Self, core_engine::RecordingError> {
-        let started_at_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| core_engine::RecordingError::Io(std::io::Error::other(error)))?
-            .as_micros();
+        Self::start(writer, device, segment, None)
+    }
+
+    /// Starts a recording whose session header declares the synthetic tremor
+    /// mixed into its reports.
+    pub fn new_synthetic(
+        writer: W,
+        device: &HidDeviceInfo,
+        segment: CalibrationSegment,
+        tremor: TremorConfig,
+    ) -> Result<Self, core_engine::RecordingError> {
+        Self::start(writer, device, segment, Some(tremor))
+    }
+
+    fn start(
+        mut writer: W,
+        device: &HidDeviceInfo,
+        segment: CalibrationSegment,
+        synthetic_tremor: Option<TremorConfig>,
+    ) -> Result<Self, core_engine::RecordingError> {
+        let started_at_us = now_us()
+            .map_err(|error| core_engine::RecordingError::Io(std::io::Error::other(error)))?;
         let session = RecordingSession {
             schema_version: 1,
             platform: std::env::consts::OS.into(),
@@ -274,6 +303,7 @@ impl<W: Write> JsonlCaptureRecorder<W> {
             },
             report_layout: "sigmachip_1c4f_0048_v1".into(),
             segment,
+            synthetic_tremor,
         };
         write_jsonl_event(&mut writer, &RecordingEvent::Session(session))?;
         Ok(Self {
@@ -284,6 +314,25 @@ impl<W: Write> JsonlCaptureRecorder<W> {
     }
 
     pub fn record(&mut self, report: &RawInputReport) -> Result<(), core_engine::RecordingError> {
+        self.write_report(report, None)
+    }
+
+    /// Records a synthetic-tremor report together with the intentional
+    /// movement it was built from, as ground truth.
+    pub fn record_synthetic(
+        &mut self,
+        report: &RawInputReport,
+        clean_dx: i8,
+        clean_dy: i8,
+    ) -> Result<(), core_engine::RecordingError> {
+        self.write_report(report, Some((clean_dx, clean_dy)))
+    }
+
+    fn write_report(
+        &mut self,
+        report: &RawInputReport,
+        clean: Option<(i8, i8)>,
+    ) -> Result<(), core_engine::RecordingError> {
         if report.bytes.len() != 4 {
             return Err(core_engine::RecordingError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -294,15 +343,11 @@ impl<W: Write> JsonlCaptureRecorder<W> {
             )));
         }
         self.sequence += 1;
+        let (clean_dx, clean_dy) = clean.unzip();
         let event = RecordedReport {
             seq: self.sequence,
             t_us: report.timestamp_us.saturating_sub(self.started_at_us) as u64,
-            raw_hex: report
-                .bytes
-                .iter()
-                .map(|byte| format!("{byte:02X}"))
-                .collect::<Vec<_>>()
-                .join(" "),
+            raw_hex: hex_bytes(&report.bytes),
             buttons: report.bytes[0],
             dx: report.bytes[1] as i8,
             dy: report.bytes[2] as i8,
@@ -310,6 +355,8 @@ impl<W: Write> JsonlCaptureRecorder<W> {
             corrected_dx: None,
             corrected_dy: None,
             filter_mode: None,
+            clean_dx,
+            clean_dy,
         };
         write_jsonl_event(&mut self.writer, &RecordingEvent::Report(event))
     }
