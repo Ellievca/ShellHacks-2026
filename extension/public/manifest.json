@@ -1,8 +1,16 @@
 {
-  "manifest_version": 3, 
+  "manifest_version": 3,
   "name": "SteadyUI",
   "version": "0.1.0",
-  "description": "An adaptive accessibility layer for users with motor impairments.",
+  "description": "Adaptive accessibility for motor impairments.",
+
+  "action": {
+    "default_title": "Open SteadyUI Calibration"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  },
 
   "content_scripts": [
     {
