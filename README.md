@@ -13,6 +13,141 @@ cargo run -p daemon -- capture --path '<HID path>'
 
 `devices` prints each visible device's VID/PID, manufacturer, product, and
 opaque HID path. `capture` prints each raw input report as timestamped hex
-until Ctrl-C. If Linux denies access, grant the user access to the matching
-`hidraw` device (typically using a narrowly scoped udev rule), then reconnect
-the mouse and try again.
+until Ctrl-C.
+
+### Linux: one-time HID permission setup
+
+Run this once for the demo `SIGMACHIP Usb Mouse` (`1c4f:0048`). It creates a
+dedicated group and grants that group access only to matching HID nodes.
+
+```bash
+sudo groupadd --force zerotremor
+sudo usermod -aG zerotremor "$USER"
+
+sudo tee /etc/udev/rules.d/99-zerotremor-mouse.rules >/dev/null <<'EOF'
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="1c4f", ATTRS{idProduct}=="0048", GROUP="zerotremor", MODE="0660"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=hidraw
+```
+
+Sign out and back in, then unplug/reconnect the mouse. Confirm that
+`id -nG` includes `zerotremor`; after that, run `capture` normally, without
+`sudo`. Do not run `sudo cargo`: root has a separate Rustup environment.
+
+### Linux: one-time virtual mouse setup
+
+The replay command creates a virtual mouse through `/dev/uinput`. Load the
+kernel module and let the same dedicated group access that node:
+
+```bash
+sudo modprobe uinput
+sudo tee /etc/udev/rules.d/99-zerotremor-uinput.rules >/dev/null <<'EOF'
+KERNEL=="uinput", GROUP="zerotremor", MODE="0660"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger /dev/uinput
+```
+
+After the sign-out/sign-in described above, `ls -l /dev/uinput` should show
+group `zerotremor`. To load the module automatically at boot, run
+`echo uinput | sudo tee /etc/modules-load.d/uinput.conf`.
+
+### Save a capture
+
+Create the destination directory before piping reports into a recording:
+
+```bash
+mkdir -p recordings
+cargo run -p daemon -- capture --vid 1c4f --pid 0048 | tee recordings/mouse_demo.txt
+```
+
+### Replay a recording
+
+```bash
+cargo run -p daemon --example replay_mouse -- recordings/mouse_demo.txt
+```
+
+The replay example keeps the timing between reports. On macOS it sends the
+decoded deltas to the native pointer sink. On Linux it creates a `uinput`
+virtual mouse named `zeroTremor Virtual Mouse` and sends the same deltas to
+the desktop cursor. The virtual device advertises standard left/right/middle
+mouse-button capabilities so Linux desktop input stacks classify it as a
+pointer.
+
+### How one replay command selects the correct OS backend
+
+The replay command is identical on both supported platforms:
+
+```bash
+cargo run -p daemon --example replay_mouse -- recordings/mouse_demo.txt
+```
+
+Rust selects the sink at compile time using `cfg(target_os)`:
+
+```text
+Linux  → LinuxUinputPointerSink → /dev/uinput virtual mouse
+macOS  → MacOsPointerSink       → CoreGraphics pointer events
+```
+
+Only the backend for the machine being built is compiled. A Linux build does
+not include the macOS CoreGraphics code, and a macOS build does not include
+the Linux `uinput` code. The shared capture decoding, replay timing, and
+future tremor filter remain the same on both platforms.
+
+## Concepts and terms
+
+The project separates reading a mouse from deciding what to do with its
+movement:
+
+```text
+physical mouse → HID report → decoder → PointerSample (dx/dy) → filter → pointer sink → cursor
+                         └──────────── replay recording ────────────┘
+```
+
+- **HID (Human Interface Device):** the standard protocol used by USB and
+  Bluetooth keyboards, mice, gamepads, and similar devices. `hidapi` is the
+  cross-platform library this project uses to list and open HID devices.
+- **VID/PID:** hexadecimal vendor ID and product ID. Together they identify a
+  device model, such as the demo mouse `1C4F:0048`. Several connected devices
+  of the same model can share a VID/PID.
+- **HID path:** an operating-system-specific identifier for one exact device
+  interface, such as `/dev/hidraw1` on Linux. A path should be copied from
+  `devices` on the machine where it will be used; it is not portable across
+  machines or operating systems.
+- **Raw input report:** the bytes sent by the mouse for one event. For the
+  current demo mouse, the observed four bytes are buttons, relative X,
+  relative Y, and wheel movement. They are shown as hexadecimal values by
+  `capture`.
+- **Decoder:** code that understands a particular device's report layout and
+  turns raw bytes into useful values. A report layout is device-specific, so
+  a decoder for the demo mouse must not be assumed to work for every mouse.
+- **`dx` / `dy`:** relative movement deltas, not screen coordinates. For
+  example, `dx=-2, dy=0` means “move two units left”; it does not mean the
+  cursor is at position `(-2, 0)`.
+- **`PointerSample`:** the shared Rust value containing decoded `dx`, `dy`,
+  and the report timestamp. Filters consume and produce these samples.
+- **Replay:** reading a saved capture log and feeding its samples back through
+  the pipeline, using the original timing between reports. It makes filter and
+  output work reproducible without touching the physical mouse.
+- **Pointer sink:** the final platform-specific component that receives a
+  relative movement and asks the OS to move a cursor. A `NoopSink` accepts
+  samples but intentionally does nothing, which is useful for safe testing.
+- **Virtual pointer sink (Linux):** a pointer sink implemented with Linux
+  `uinput`. It creates a virtual mouse device in the kernel and sends it
+  relative movement; the desktop treats that virtual device like a mouse.
+  `LinuxUinputPointerSink` is this project's implementation.
+- **Native pointer sink (macOS):** the macOS implementation uses CoreGraphics
+  to post pointer movement. It may require Accessibility permission.
+- **udev rule:** a Linux rule that sets access permissions when a device is
+  connected. The README rule grants the `zerotremor` group access only to the
+  selected demo mouse's `hidraw` interface.
+
+### Current safety limitation
+
+Reading a HID mouse does not automatically stop the physical mouse from
+moving the cursor. Until exclusive capture/suppression is intentionally added
+and tested, a future virtual sink could result in both the physical and
+virtual mouse affecting the cursor. Keep the physical-mouse capture and
+cursor-output experiments separate during development.
