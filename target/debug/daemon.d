@@ -1,0 +1,1 @@
+/Users/ellie/Documents/GitHub/ShellHacks-2026/target/debug/daemon: /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/core-engine/src/lib.rs /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/daemon/src/main.rs /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/hid-capture/src/lib.rs /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/os-virtual-input/src/lib.rs

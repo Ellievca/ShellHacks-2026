@@ -1,0 +1,1 @@
+/Users/ellie/Documents/GitHub/ShellHacks-2026/target/debug/libhid_capture.rlib: /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/core-engine/src/lib.rs /Users/ellie/Documents/GitHub/ShellHacks-2026/crates/hid-capture/src/lib.rs
