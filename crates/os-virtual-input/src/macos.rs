@@ -4,7 +4,7 @@ use std::fmt;
 use core_engine::PointerSink;
 
 use core_graphics::display::CGDisplay;
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
@@ -105,6 +105,8 @@ impl MacOsPointerSink {
         )
         .map_err(|_| MacOsSinkError::new("Failed to create synthetic mouse movement event"))?;
 
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, ZEROTREMOR_EVENT_MARKER);
+
         event.post(CGEventTapLocation::HID);
 
         Ok(())
@@ -126,3 +128,5 @@ impl PointerSink for MacOsPointerSink {
         Self::move_cursor_to(CGPoint::new(target_x, target_y))
     }
 }
+
+pub const ZEROTREMOR_EVENT_MARKER: i64 = 0x5A54_524D;

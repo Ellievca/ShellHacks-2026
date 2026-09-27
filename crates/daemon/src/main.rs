@@ -4,6 +4,8 @@ use hid_capture::{list_devices, open_device, DeviceSelection, DeviceSelector};
 use std::env;
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -52,24 +54,49 @@ fn print_devices() -> Result<(), String> {
 
 fn capture(selection: DeviceSelection) -> Result<(), String> {
     let opened = open_device(selection).map_err(|error| error.to_string())?;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_for_handler = Arc::clone(&running);
+
+    ctrlc::set_handler(move || {
+        running_for_handler.store(false, Ordering::SeqCst);
+    })
+    .map_err(|error| format!("could not install Ctrl+C handler: {error}"))?;
+
     println!(
-        "Capturing raw reports from {:04X}:{:04X} {} (Ctrl-C to stop)",
+        "Capturing raw reports from {:04X}:{:04X} {}",
         opened.info.vendor_id, opened.info.product_id, opened.info.path
     );
-    loop {
-        if let Some(report) = opened.read_raw(1_000).map_err(|error| error.to_string())? {
+
+    println!("Physical mouse is seized while capture is active.");
+    println!("Press Ctrl+C to disable and restore normal mouse control.");
+
+    while running.load(Ordering::SeqCst) {
+        if let Some(report) = opened.read_raw(100).map_err(|error| error.to_string())? {
             let bytes = report
                 .bytes
                 .iter()
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<Vec<_>>()
                 .join(" ");
+
             println!("timestamp_us={} report={bytes}", report.timestamp_us);
+
             std::io::stdout()
                 .flush()
                 .map_err(|error| format!("could not write raw report output: {error}"))?;
         }
     }
+
+    println!();
+    println!("Filtering disabled.");
+    println!("Releasing physical mouse...");
+
+    drop(opened);
+
+    println!("Normal mouse control restored.");
+
+    Ok(())
 }
 
 fn parse_selection(args: &[String]) -> Result<DeviceSelection, String> {
