@@ -24,6 +24,17 @@ pub trait PointerSink {
     type Error;
 
     fn emit_relative(&mut self, dx: f32, dy: f32) -> Result<(), Self::Error>;
+
+    /// Mirrors a HID button byte (bit 0 left, bit 1 right, bit 2 middle).
+    /// A seized device's clicks only reach the OS through this.
+    fn set_buttons(&mut self, _buttons: u8) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Emits vertical wheel movement in lines; positive scrolls up.
+    fn scroll(&mut self, _lines: i32) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// Transforms raw pointer movement into a filtered movement.

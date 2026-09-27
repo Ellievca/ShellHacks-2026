@@ -50,21 +50,23 @@ pub struct TremorSimulator {
     config: TremorConfig,
     start_us: Option<u64>,
 
-    previous_x: f32,
-    previous_y: f32,
-
-    initialized: bool,
+    /// Tremor position at the previous sample.
+    previous: (f32, f32),
 }
 
 impl TremorSimulator {
     pub fn new(config: TremorConfig) -> Self {
-        Self {
+        let mut simulator = Self {
             config,
             start_us: None,
-            previous_x: 0.0,
-            previous_y: 0.0,
-            initialized: false,
-        }
+            previous: (0.0, 0.0),
+        };
+
+        // The first sample lands at t = 0, so starting from that position
+        // prevents a fake jump on the first sample.
+        simulator.previous = simulator.tremor_position(0.0);
+
+        simulator
     }
 
     fn tremor_position(&self, time_seconds: f32) -> (f32, f32) {
@@ -88,30 +90,14 @@ impl TremorSimulator {
 
         let time_seconds = elapsed_us as f32 / 1_000_000.0;
 
-        let (current_x, current_y) = self.tremor_position(time_seconds);
-
-        // Prevent a fake jump on the first sample.
-        if !self.initialized {
-            self.previous_x = current_x;
-            self.previous_y = current_y;
-            self.initialized = true;
-
-            return SimulatedPointerSample {
-                clean,
-                observed: clean,
-                tremor_dx: 0.0,
-                tremor_dy: 0.0,
-            };
-        }
+        let current = self.tremor_position(time_seconds);
+        let (previous_x, previous_y) = std::mem::replace(&mut self.previous, current);
 
         // PointerSample contains relative movement, so convert
         // our oscillating POSITION into relative DELTAS.
-        let tremor_dx = current_x - self.previous_x;
+        let tremor_dx = current.0 - previous_x;
 
-        let tremor_dy = current_y - self.previous_y;
-
-        self.previous_x = current_x;
-        self.previous_y = current_y;
+        let tremor_dy = current.1 - previous_y;
 
         let observed = PointerSample {
             dx: clean.dx + tremor_dx,

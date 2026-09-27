@@ -1,176 +1,208 @@
 #[cfg(target_os = "macos")]
-use std::{
-    env,
-    error::Error,
-    fs::{create_dir_all, File},
-    io::{BufWriter, Write},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    live::run()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("The live cursor demo is currently implemented for macOS.");
+}
 
 #[cfg(target_os = "macos")]
-use core_engine::{PointerSample, PointerSink, TremorConfig, TremorSimulator};
-
-#[cfg(target_os = "macos")]
-use hid_capture::{open_device, DeviceSelection, DeviceSelector};
-
-#[cfg(target_os = "macos")]
-use os_virtual_input::MacOsPointerSink;
-
-#[cfg(target_os = "macos")]
-fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = env::args().collect();
-
-    let frequency_hz: f32 = args
-        .get(1)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(6.0);
-
-    let amplitude: f32 = args
-        .get(2)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(6.0);
-
-    let output_path = args
-        .get(3)
-        .cloned()
-        .unwrap_or_else(|| "recordings/synthetic_tremor.csv".to_string());
-
-    create_dir_all("recordings")?;
-
-    let file = File::create(&output_path)?;
-    let mut writer = BufWriter::new(file);
-
-    writeln!(
-        writer,
-        "timestamp_us,frequency_hz,amplitude_px,\
-clean_dx,clean_dy,tremor_dx,tremor_dy,\
-observed_dx,observed_dy"
-    )?;
-
-    let config = TremorConfig {
-        frequency_hz,
-        amplitude_x: amplitude,
-        amplitude_y: amplitude * 0.75,
-
-        // X/Y don't shake perfectly together.
-        y_phase_rad: 1.2,
-
-        // Slowly changing tremor intensity.
-        amplitude_mod_hz: 0.35,
-        amplitude_mod_depth: 0.25,
+mod live {
+    use std::{
+        env,
+        error::Error,
+        fs::{create_dir_all, File},
+        io::{self, BufWriter, Write},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, Instant},
     };
 
-    let mut simulator = TremorSimulator::new(config);
-
-    let selection = DeviceSelection::VidPid(DeviceSelector {
-        vendor_id: 0x1c4f,
-        product_id: 0x0048,
-    });
-
-    println!("Opening demo mouse 1C4F:0048...");
-
-    let opened = open_device(selection)?;
-
-    println!("Mouse seized.");
-    println!(
-        "Synthetic tremor: {:.1} Hz, {:.1}px amplitude",
-        frequency_hz, amplitude
-    );
-
-    println!("Saving data to: {output_path}");
-    println!("Press Ctrl+C to stop.");
-
-    let running = Arc::new(AtomicBool::new(true));
-
-    let handler_running = Arc::clone(&running);
-
-    ctrlc::set_handler(move || {
-        handler_running.store(false, Ordering::SeqCst);
-    })?;
-
-    let mut sink = MacOsPointerSink::new()?;
+    use core_engine::{
+        PointerSample, PointerSink, SimulatedPointerSample, TremorConfig, TremorSimulator,
+    };
+    use hid_capture::{open_device, DeviceSelection, DeviceSelector, MouseReport, OpenedDevice};
+    use os_virtual_input::MacOsPointerSink;
 
     // 125 Hz simulator
-    let tick = Duration::from_micros(8_000);
+    const TICK: Duration = Duration::from_micros(8_000);
 
-    let start = Instant::now();
-    let mut next_tick = Instant::now();
+    struct Args {
+        frequency_hz: f32,
+        amplitude: f32,
+        output_path: String,
+    }
 
-    while running.load(Ordering::SeqCst) {
-        next_tick += tick;
+    pub fn run() -> Result<(), Box<dyn Error>> {
+        let args = parse_args();
+        let mut writer = create_csv(&args.output_path)?;
 
-        // Intentional movement collected from the
-        // physical mouse during this 8 ms window.
-        let mut clean_dx = 0.0_f32;
-        let mut clean_dy = 0.0_f32;
+        let mut simulator = TremorSimulator::new(TremorConfig {
+            frequency_hz: args.frequency_hz,
+            amplitude_x: args.amplitude,
+            amplitude_y: args.amplitude * 0.75,
+            ..TremorConfig::default()
+        });
 
-        // Drain queued HID reports.
-        for _ in 0..32 {
-            let Some(report) = opened.read_raw(0)? else {
-                break;
-            };
+        let opened = open_demo_mouse(&args)?;
+        let running = stop_on_ctrl_c()?;
+        let mut sink = MacOsPointerSink::new()?;
 
-            if report.bytes.len() < 3 {
-                continue;
-            }
+        let start = Instant::now();
+        let mut next_tick = Instant::now();
 
-            clean_dx += report.bytes[1] as i8 as f32;
+        while running.load(Ordering::SeqCst) {
+            next_tick += TICK;
 
-            clean_dy += report.bytes[2] as i8 as f32;
+            let (dx, dy) = drain_reports(&opened, &mut sink)?;
+            let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let simulated = simulator.inject(PointerSample {
+                dx,
+                dy,
+                timestamp_us,
+            });
+
+            write_row(&mut writer, &args, &simulated)?;
+            sink.emit_relative(simulated.observed.dx, simulated.observed.dy)?;
+
+            sleep_until(&mut next_tick);
         }
 
-        let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        writer.flush()?;
 
-        let clean = PointerSample {
-            dx: clean_dx,
-            dy: clean_dy,
-            timestamp_us,
+        println!();
+        println!("Simulation stopped.");
+        println!("Mouse released.");
+        println!("Saved: {}", args.output_path);
+
+        Ok(())
+    }
+
+    fn parse_args() -> Args {
+        let args: Vec<String> = env::args().collect();
+        let number_or = |index: usize, default: f32| {
+            args.get(index)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
         };
 
-        let simulated = simulator.inject(clean);
+        Args {
+            frequency_hz: number_or(1, 6.0),
+            amplitude: number_or(2, 6.0),
+            output_path: args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| "recordings/synthetic_tremor.csv".to_string()),
+        }
+    }
+
+    fn create_csv(path: &str) -> io::Result<BufWriter<File>> {
+        create_dir_all("recordings")?;
+
+        let mut writer = BufWriter::new(File::create(path)?);
 
         writeln!(
             writer,
+            "timestamp_us,frequency_hz,amplitude_px,\
+clean_dx,clean_dy,tremor_dx,tremor_dy,\
+observed_dx,observed_dy"
+        )?;
+
+        Ok(writer)
+    }
+
+    fn open_demo_mouse(args: &Args) -> Result<OpenedDevice, Box<dyn Error>> {
+        println!("Opening demo mouse 1C4F:0048...");
+
+        let opened = open_device(DeviceSelection::VidPid(DeviceSelector {
+            vendor_id: 0x1c4f,
+            product_id: 0x0048,
+        }))?;
+
+        println!("Mouse seized.");
+        println!(
+            "Synthetic tremor: {:.1} Hz, {:.1}px amplitude",
+            args.frequency_hz, args.amplitude
+        );
+        println!("Saving data to: {}", args.output_path);
+        println!("Press Ctrl+C to stop.");
+
+        Ok(opened)
+    }
+
+    fn stop_on_ctrl_c() -> Result<Arc<AtomicBool>, ctrlc::Error> {
+        let running = Arc::new(AtomicBool::new(true));
+        let handler_running = Arc::clone(&running);
+
+        ctrlc::set_handler(move || handler_running.store(false, Ordering::SeqCst))?;
+
+        Ok(running)
+    }
+
+    /// Drains queued HID reports and returns the intentional movement collected
+    /// from the physical mouse during this 8 ms window. The mouse is seized, so
+    /// clicks and scrolling are forwarded to the sink here too.
+    fn drain_reports(
+        opened: &OpenedDevice,
+        sink: &mut MacOsPointerSink,
+    ) -> Result<(f32, f32), Box<dyn Error>> {
+        let (mut dx, mut dy, mut wheel) = (0.0_f32, 0.0_f32, 0_i32);
+
+        for _ in 0..32 {
+            let Some(raw) = opened.read_raw(0)? else {
+                break;
+            };
+
+            let Some(report) = MouseReport::decode(&raw.bytes) else {
+                continue;
+            };
+
+            dx += report.dx;
+            dy += report.dy;
+            wheel += i32::from(report.wheel);
+
+            // Per report, so a press and release inside one tick both land.
+            sink.set_buttons(report.buttons)?;
+        }
+
+        sink.scroll(wheel)?;
+
+        Ok((dx, dy))
+    }
+
+    fn write_row(
+        writer: &mut impl Write,
+        args: &Args,
+        simulated: &SimulatedPointerSample,
+    ) -> io::Result<()> {
+        writeln!(
+            writer,
             "{},{:.3},{:.3},{:.5},{:.5},{:.5},{:.5},{:.5},{:.5}",
-            timestamp_us,
-            frequency_hz,
-            amplitude,
+            simulated.clean.timestamp_us,
+            args.frequency_hz,
+            args.amplitude,
             simulated.clean.dx,
             simulated.clean.dy,
             simulated.tremor_dx,
             simulated.tremor_dy,
             simulated.observed.dx,
             simulated.observed.dy,
-        )?;
-
-        sink.emit_relative(simulated.observed.dx, simulated.observed.dy)?;
-
-        let now = Instant::now();
-
-        if next_tick > now {
-            thread::sleep(next_tick - now);
-        } else {
-            // Don't accumulate timing lag.
-            next_tick = now;
-        }
+        )
     }
 
-    writer.flush()?;
+    fn sleep_until(next_tick: &mut Instant) {
+        let now = Instant::now();
 
-    println!();
-    println!("Simulation stopped.");
-    println!("Mouse released.");
-    println!("Saved: {output_path}");
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn main() {
-    eprintln!("The live cursor demo is currently implemented for macOS.");
+        if *next_tick > now {
+            thread::sleep(*next_tick - now);
+        } else {
+            // Don't accumulate timing lag.
+            *next_tick = now;
+        }
+    }
 }
