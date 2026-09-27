@@ -177,6 +177,40 @@ fast flicks. Re-run `calibrate` after updating zeroTremor: existing profiles
 remain readable, but a new profile includes the current deadband cap and
 integer-delta smoothing tuning.
 
+### Telemetry console UI
+
+The React console in `extension/` visualizes every safe-validation stage:
+physical-device identity, HID decoding, active profile, raw and corrected
+deltas, filter decisions, pointer emission, and aggregate travel reduction.
+
+```bash
+cd extension
+npm ci
+npm run dev
+```
+
+Use **Run validation preview** to animate a deterministic recording-like feed.
+It does not open a HID device or move a cursor. The UI already accepts daemon
+frames as browser events, which keeps the display layer independent of the
+filter implementation:
+
+```js
+window.dispatchEvent(new CustomEvent('zerotremor:telemetry', {
+  detail: {
+    timestampUs: 1790486547208000,
+    rawDx: -2,
+    rawDy: 1,
+    correctedDx: 0,
+    correctedDy: 0,
+    mode: 'Deadband'
+  }
+}))
+```
+
+A desktop/native bridge can forward each `replay-filter` report into that
+event contract later. Until that bridge is added, the console is explicitly a
+safe preview rather than a claim of live device telemetry.
+
 ### Replay a recording
 
 ```bash
