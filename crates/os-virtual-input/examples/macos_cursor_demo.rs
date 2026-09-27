@@ -1,9 +1,14 @@
+#[cfg(target_os = "macos")]
 use std::thread;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
 use core_engine::PointerSink;
+#[cfg(target_os = "macos")]
 use os_virtual_input::MacOsPointerSink;
 
+#[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting macOS cursor test...");
 
@@ -34,4 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Cursor test complete.");
 
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("macos_cursor_demo is only available on macOS");
 }

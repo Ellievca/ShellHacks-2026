@@ -6,7 +6,12 @@ use std::time::Duration;
 
 use core_engine::{PassthroughFilter, PointerFilter, PointerSample, PointerSink};
 
+#[cfg(target_os = "linux")]
+use os_virtual_input::LinuxUinputPointerSink;
+#[cfg(target_os = "macos")]
 use os_virtual_input::MacOsPointerSink;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+use os_virtual_input::NoopSink;
 
 fn parse_capture_line(line: &str) -> Option<PointerSample> {
     let (timestamp_part, report_part) = line.split_once(" report=")?;
@@ -57,14 +62,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Loaded {} mouse samples.", samples.len());
     println!("Starting replay in 2 seconds...");
+
+    #[cfg(target_os = "macos")]
     println!("Keep your hand off the physical mouse.");
+    #[cfg(target_os = "linux")]
+    println!("A zeroTremor virtual mouse will replay the decoded movement.");
 
     thread::sleep(Duration::from_secs(2));
 
+    #[cfg(target_os = "macos")]
     let mut sink = MacOsPointerSink::new()?;
+    #[cfg(target_os = "linux")]
+    let mut sink = LinuxUinputPointerSink::new()?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let mut sink = NoopSink;
     let mut filter = PassthroughFilter;
 
     let mut previous_timestamp: Option<u64> = None;
+    let mut emitted_samples = 0_usize;
 
     for sample in samples {
         if let Some(previous) = previous_timestamp {
@@ -79,12 +94,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let filtered = filter.filter(sample);
 
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        println!(
+            "timestamp_us={} dx={} dy={}",
+            filtered.timestamp_us, filtered.dx, filtered.dy
+        );
         sink.emit_relative(filtered.dx, filtered.dy)?;
+        if filtered.dx != 0.0 || filtered.dy != 0.0 {
+            emitted_samples += 1;
+        }
 
         previous_timestamp = Some(sample.timestamp_us);
     }
 
-    println!("Replay complete.");
+    println!("Replay complete. Emitted {emitted_samples} non-zero movement samples.");
 
     Ok(())
 }
